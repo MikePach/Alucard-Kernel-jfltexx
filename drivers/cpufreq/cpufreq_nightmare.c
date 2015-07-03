@@ -396,7 +396,7 @@ static ssize_t store_io_is_busy(struct kobject *a, struct attribute *b,
 	nightmare_tuners_ins.io_is_busy = !!input;
 
 	/* we need to re-evaluate prev_cpu_idle */
-	cpu_maps_update_begin();
+	get_online_cpus();
 	for_each_online_cpu(cpu) {
 		struct cpufreq_nightmare_cpuinfo *this_nightmare_cpuinfo = 
 			&per_cpu(od_nightmare_cpuinfo, cpu);
@@ -404,7 +404,7 @@ static ssize_t store_io_is_busy(struct kobject *a, struct attribute *b,
 		this_nightmare_cpuinfo->prev_cpu_idle = get_cpu_idle_time(cpu,
 			&this_nightmare_cpuinfo->prev_cpu_wall, nightmare_tuners_ins.io_is_busy);
 	}
-	cpu_maps_update_done();
+	put_online_cpus();
 	return count;
 }
 
@@ -661,17 +661,14 @@ static int cpufreq_governor_nightmare(struct cpufreq_policy *policy,
 		break;
 	case CPUFREQ_GOV_LIMITS:
 		mutex_lock(&this_nightmare_cpuinfo->timer_mutex);
-		if (!this_nightmare_cpuinfo->cur_policy->cur) {
+		if (!this_nightmare_cpuinfo->cur_policy->cur
+			 || !policy->cur) {
 			pr_debug("Unable to limit cpu freq due to cur_policy == NULL\n");
 			mutex_unlock(&this_nightmare_cpuinfo->timer_mutex);
 			return -EPERM;
 		}
-		if (policy->max < this_nightmare_cpuinfo->cur_policy->cur)
-			__cpufreq_driver_target(this_nightmare_cpuinfo->cur_policy,
-				policy->max, CPUFREQ_RELATION_H);
-		else if (policy->min > this_nightmare_cpuinfo->cur_policy->cur)
-			__cpufreq_driver_target(this_nightmare_cpuinfo->cur_policy,
-				policy->min, CPUFREQ_RELATION_L);
+		__cpufreq_driver_target(this_nightmare_cpuinfo->cur_policy,
+				policy->cur, CPUFREQ_RELATION_L);
 		mutex_unlock(&this_nightmare_cpuinfo->timer_mutex);
 
 		break;

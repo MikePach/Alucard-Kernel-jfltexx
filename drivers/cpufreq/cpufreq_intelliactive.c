@@ -52,6 +52,7 @@ struct cpufreq_interactive_cpuinfo {
 	int governor_enabled;
 	int prev_load;
 	unsigned int two_phase_freq;
+	unsigned int cpu;
 };
 
 static DEFINE_PER_CPU(struct cpufreq_interactive_cpuinfo, cpuinfo);
@@ -1300,16 +1301,20 @@ static int cpufreq_governor_intelliactive(struct cpufreq_policy *policy,
 	struct cpufreq_interactive_cpuinfo *pcpu;
 	struct cpufreq_frequency_table *freq_table;
 	unsigned long flags;
+	unsigned int cpu = policy->cpu;
+
+	pcpu = &per_cpu(cpuinfo, cpu);
 
 	switch (event) {
 	case CPUFREQ_GOV_START:
-		if (!cpu_online(policy->cpu))
+		if (!cpu_online(cpu))
 			return -EINVAL;
 
 		mutex_lock(&gov_lock);
 
 		freq_table =
-			cpufreq_frequency_get_table(policy->cpu);
+			cpufreq_frequency_get_table(cpu);
+		pcpu->cpu = cpu;
 		if (!hispeed_freq)
 			hispeed_freq = policy->max;
 
@@ -1381,12 +1386,11 @@ static int cpufreq_governor_intelliactive(struct cpufreq_policy *policy,
 		break;
 
 	case CPUFREQ_GOV_LIMITS:
-		if (policy->max < policy->cur)
-			__cpufreq_driver_target(policy,
-					policy->max, CPUFREQ_RELATION_H);
-		else if (policy->min > policy->cur)
-			__cpufreq_driver_target(policy,
-					policy->min, CPUFREQ_RELATION_L);
+		/* If device is being removed, skip set limits */
+		if (!policy->cur)
+			break;
+		__cpufreq_driver_target(policy,
+				policy->cur, CPUFREQ_RELATION_L);
 		for_each_cpu(j, policy->cpus) {
 			pcpu = &per_cpu(cpuinfo, j);
 

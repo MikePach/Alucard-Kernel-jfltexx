@@ -483,12 +483,12 @@ static void hotplug_stop(void)
 #endif
 
 	cpu_notifier_register_begin();
+	__unregister_hotcpu_notifier(&alucard_hotplug_nb);
 	for_each_possible_cpu(cpu) {
 		struct hotplug_cpuinfo *pcpu_info = &per_cpu(od_hotplug_cpuinfo, cpu);
 
 		cancel_delayed_work_sync(&pcpu_info->work);
 	}
-	__unregister_hotcpu_notifier(&alucard_hotplug_nb);
 	cpu_notifier_register_done();
 
 	stop_rq_work();

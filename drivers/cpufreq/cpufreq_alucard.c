@@ -381,7 +381,7 @@ static ssize_t store_io_is_busy(struct kobject *a, struct attribute *b,
 	alucard_tuners_ins.io_is_busy = !!input;
 
 	/* we need to re-evaluate prev_cpu_idle */
-	cpu_maps_update_begin();
+	get_online_cpus();
 	for_each_online_cpu(cpu) {
 		struct cpufreq_alucard_cpuinfo *this_alucard_cpuinfo = 
 			&per_cpu(od_alucard_cpuinfo, cpu);
@@ -389,7 +389,7 @@ static ssize_t store_io_is_busy(struct kobject *a, struct attribute *b,
 		this_alucard_cpuinfo->prev_cpu_idle = get_cpu_idle_time(cpu,
 			&this_alucard_cpuinfo->prev_cpu_wall, alucard_tuners_ins.io_is_busy);
 	}
-	cpu_maps_update_done();
+	put_online_cpus();
 	return count;
 }
 
@@ -621,7 +621,7 @@ static void do_alucard_timer(struct work_struct *work)
 	struct cpufreq_alucard_cpuinfo *this_alucard_cpuinfo = 
 		container_of(work, struct cpufreq_alucard_cpuinfo, work.work);
 	int delay;
-	
+
 	mutex_lock(&this_alucard_cpuinfo->timer_mutex);
 
 	alucard_check_cpu(this_alucard_cpuinfo);
@@ -719,17 +719,14 @@ static int cpufreq_governor_alucard(struct cpufreq_policy *policy,
 		break;
 	case CPUFREQ_GOV_LIMITS:
 		mutex_lock(&this_alucard_cpuinfo->timer_mutex);
-		if (!this_alucard_cpuinfo->cur_policy->cur) {
+		if (!this_alucard_cpuinfo->cur_policy->cur
+			 || !policy->cur) {
 			pr_debug("Unable to limit cpu freq due to cur_policy == NULL\n");
 			mutex_unlock(&this_alucard_cpuinfo->timer_mutex);
 			return -EPERM;
 		}
-		if (policy->max < this_alucard_cpuinfo->cur_policy->cur)
-			__cpufreq_driver_target(this_alucard_cpuinfo->cur_policy,
-				policy->max, CPUFREQ_RELATION_H);
-		else if (policy->min > this_alucard_cpuinfo->cur_policy->cur)
-			__cpufreq_driver_target(this_alucard_cpuinfo->cur_policy,
-				policy->min, CPUFREQ_RELATION_L);
+		__cpufreq_driver_target(this_alucard_cpuinfo->cur_policy,
+				policy->cur, CPUFREQ_RELATION_L);
 
 		cpufreq_frequency_table_policy_minmax_limits(policy,
 				this_alucard_cpuinfo);

@@ -26,6 +26,7 @@ show_progress(0.100000, 60);
 ui_print("Deleting old STweaks app.");
 ui_print("");
 delete_recursive("/system/app/STweaks.apk");
+delete_recursive("/system/priv-app/STweaks.apk");
 delete_recursive("/system/priv-app/STweaks/STweaks.apk");
 
 ui_print("Deleting old modules");

@@ -78,18 +78,6 @@ static u64 hyper_sampling_rate_boosted_time;
 unsigned int hyper_current_sampling_rate;
 
 static void do_dbs_timer(struct work_struct *work);
-static int cpufreq_governor_dbs(struct cpufreq_policy *policy,
-				unsigned int event);
-
-#ifndef CONFIG_CPU_FREQ_DEFAULT_GOV_HYPER
-static
-#endif
-struct cpufreq_governor cpufreq_gov_HYPER = {
-       .name                   = "HYPER",
-       .governor               = cpufreq_governor_dbs,
-       .max_transition_latency = TRANSITION_LATENCY_LIMIT,
-       .owner                  = THIS_MODULE,
-};
 
 /* Sampling types */
 enum {DBS_NORMAL_SAMPLE, DBS_SUB_SAMPLE};
@@ -108,7 +96,7 @@ struct cpu_dbs_info_s {
 	unsigned int freq_hi_jiffies;
 	unsigned int rate_mult;
 	unsigned int load_at_prev_sample;
-	int cpu;
+	unsigned int cpu;
 	unsigned int sample_type:1;
 	/*
 	 * percpu mutex that serializes governor limit change with
@@ -591,7 +579,7 @@ static void dbs_check_cpu(struct cpu_dbs_info_s *this_dbs_info)
 	j_dbs_info = &per_cpu(od_cpu_dbs_info, j);
 
 	/* Only core0 controls the boost */
-	if (dbs_tuners_ins.boosted && policy->cpu == 0) {
+	if (dbs_tuners_ins.boosted && this_dbs_info->cpu == 0) {
 		if (ktime_to_us(ktime_get()) - hyper_freq_boosted_time >=
 					dbs_tuners_ins.freq_boost_time) {
 			dbs_tuners_ins.boosted = 0;
@@ -599,7 +587,7 @@ static void dbs_check_cpu(struct cpu_dbs_info_s *this_dbs_info)
 	}
 
 	/* Only core0 controls the timer_rate */
-	if (hyper_sampling_rate_boosted && policy->cpu == 0) {
+	if (hyper_sampling_rate_boosted && this_dbs_info->cpu == 0) {
 		if (ktime_to_us(ktime_get()) - hyper_sampling_rate_boosted_time >=
 					TIMER_RATE_BOOST_TIME) {
 
@@ -978,12 +966,8 @@ static int cpufreq_governor_dbs(struct cpufreq_policy *policy,
 		if (!this_dbs_info->cur_policy)
 			break;
 		mutex_lock(&this_dbs_info->timer_mutex);
-		if (policy->max < this_dbs_info->cur_policy->cur)
-			__cpufreq_driver_target(this_dbs_info->cur_policy,
-				policy->max, CPUFREQ_RELATION_H);
-		else if (policy->min > this_dbs_info->cur_policy->cur)
-			__cpufreq_driver_target(this_dbs_info->cur_policy,
-				policy->min, CPUFREQ_RELATION_L);
+		__cpufreq_driver_target(this_dbs_info->cur_policy,
+				policy->cur, CPUFREQ_RELATION_L);
 		dbs_check_cpu(this_dbs_info);
 		mutex_unlock(&this_dbs_info->timer_mutex);
 
@@ -991,6 +975,16 @@ static int cpufreq_governor_dbs(struct cpufreq_policy *policy,
 	}
 	return 0;
 }
+
+#ifndef CONFIG_CPU_FREQ_DEFAULT_GOV_HYPER
+static
+#endif
+struct cpufreq_governor cpufreq_gov_HYPER = {
+	.name			= "HYPER",
+	.governor		= cpufreq_governor_dbs,
+	.max_transition_latency	= TRANSITION_LATENCY_LIMIT,
+	.owner			= THIS_MODULE,
+};
 
 static int __init cpufreq_gov_dbs_init(void)
 {
