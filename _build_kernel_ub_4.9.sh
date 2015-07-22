@@ -14,7 +14,7 @@ export PACKAGEDIR=$KERNELDIR/READY-JB
 #Enable FIPS mode
 export USE_SEC_FIPS_MODE=true
 export ARCH=arm
-export CROSS_COMPILE=../arm-eabi-4.9/bin/arm-eabi-
+export CROSS_COMPILE=../arm-eabi-4.9-UB/bin/arm-eabi-
 export KERNEL_CONFIG=alucard_defconfig;
 
 chmod -R 777 /tmp;
@@ -38,7 +38,7 @@ if [ -d $INITRAMFS_TMP ]; then
 fi;
 
 # copy new config
-cp $KERNELDIR/.config $KERNELDIR/arch/arm/configs/$KERNEL_CONFIG;
+cp .config arch/arm/configs/$KERNEL_CONFIG;
 
 # remove all old modules before compile
 for i in `find $KERNELDIR/ -name "*.ko"`; do
@@ -67,8 +67,8 @@ for i in `find $INITRAMFS_TMP -name EMPTY_DIRECTORY`; do
 done;
 
 # copy config
-if [ ! -f $KERNELDIR/.config ]; then
-	cp $KERNELDIR/arch/arm/configs/$KERNEL_CONFIG $KERNELDIR/.config;
+if [ ! -f .config ]; then
+	cp arch/arm/configs/$KERNEL_CONFIG .config;
 fi;
 
 # read config
@@ -95,7 +95,7 @@ echo "Making kernel";
 make -j${NAMBEROFCPUS} || exit 1;
 
 echo "Copy modules to Package"
-for i in `find $KERNELDIR -name '*.ko'`; do
+for i in `find $KERNELDIR/ -name "*.ko"`; do
 	cp -av $i $PACKAGEDIR/system/lib/modules/;
 done;
 
@@ -129,7 +129,7 @@ if [ -e $KERNELDIR/arch/arm/boot/zImage ]; then
 	 rm $i;
 	done;
 
-	FILENAME=Kernel-Alucard-${GETVER}-`date +"[%H-%M]-[%d-%m]-AOSPV2-EUR-LP5.0-SGIV-PWR-CORE"`.zip
+	FILENAME=Kernel-Alucard-${GETVER}-`date +"[%H-%M]-[%d-%m]-AOSPV2-EUR-LP5.1-SGIV-PWR-CORE"`.zip
 	zip -r $FILENAME .;
 
 	time_end=$(date +%s.%N)
