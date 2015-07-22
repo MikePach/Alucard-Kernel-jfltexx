@@ -23,7 +23,6 @@
 
 #define MMC_QUEUE_BOUNCESZ	65536
 
-
 /*
  * Based on benchmark tests the default num of requests to trigger the write
  * packing was determined, to keep the read latency as low as possible and
@@ -46,7 +45,7 @@ static int mmc_prep_request(struct request_queue *q, struct request *req)
 		return BLKPREP_KILL;
 	}
 
-	if (mq && mmc_card_removed(mq->card))
+	if (mq && (mmc_card_removed(mq->card) || mmc_access_rpmb(mq)))
 		return BLKPREP_KILL;
 
 	req->cmd_flags |= REQ_DONTPREP;
@@ -64,8 +63,8 @@ static int mmc_queue_thread(void *d)
 
 	down(&mq->thread_sem);
 	do {
-		struct mmc_queue_req *tmp;
 		struct request *req = NULL;
+		struct mmc_queue_req *tmp;
 
 		spin_lock_irq(q->queue_lock);
 		set_current_state(TASK_INTERRUPTIBLE);
@@ -124,7 +123,7 @@ static int mmc_queue_thread(void *d)
  * on any queue on this host, and attempt to issue it.  This may
  * not be the queue we were asked to process.
  */
-static void mmc_request(struct request_queue *q)
+static void mmc_request_fn(struct request_queue *q)
 {
 	struct mmc_queue *mq = q->queuedata;
 	struct request *req;
@@ -173,7 +172,7 @@ static void mmc_urgent_request(struct request_queue *q)
 	struct mmc_context_info *cntx;
 
 	if (!mq) {
-		mmc_request(q);
+		mmc_request_fn(q);
 		return;
 	}
 	cntx = &mq->card->host->context_info;
@@ -193,7 +192,7 @@ static void mmc_urgent_request(struct request_queue *q)
 		wake_up_interruptible(&cntx->wait);
 	} else {
 		spin_unlock_irqrestore(&cntx->lock, flags);
-		mmc_request(q);
+		mmc_request_fn(q);
 	}
 }
 
@@ -260,7 +259,7 @@ int mmc_init_queue(struct mmc_queue *mq, struct mmc_card *card,
 		limit = *mmc_dev(host)->dma_mask;
 
 	mq->card = card;
-	mq->queue = blk_init_queue(mmc_request, lock);
+	mq->queue = blk_init_queue(mmc_request_fn, lock);
 	if (!mq->queue)
 		return -ENOMEM;
 

@@ -137,7 +137,10 @@ static int mmc_ios_show(struct seq_file *s, void *data)
 		str = "sd uhs DDR50";
 		break;
 	case MMC_TIMING_MMC_HS200:
-		str = "mmc high-speed SDR200";
+		str = "mmc high-speed HS200";
+		break;
+	case MMC_TIMING_MMC_HS400:
+		str = "mmc high-speed HS400";
 		break;
 	default:
 		str = "invalid";
@@ -334,7 +337,7 @@ static int mmc_ext_csd_open(struct inode *inode, struct file *filp)
 	if (err)
 		goto out_free;
 
-	for (i = 511; i >= 0; i--)
+	for (i = 0; i < 512; i++)
 		n += sprintf(buf + n, "%02x", ext_csd[i]);
 	n += sprintf(buf + n, "\n");
 	BUG_ON(n != EXT_CSD_STR_LEN);

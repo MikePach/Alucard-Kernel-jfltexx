@@ -1,7 +1,7 @@
 #!/bin/bash
 
 cp -pv .config .config.bkp;
-make ARCH=arm CROSS_COMPILE=../../cr-arm-eabi-4.9.3/bin/arm-eabi- mrproper;
+make ARCH=arm CROSS_COMPILE=../../cr-arm-eabi-4.9.4/bin/arm-eabi- mrproper;
 cp -pv .config.bkp .config;
 make clean && make mrproper;
 rm -rf ./kernel/usr;
