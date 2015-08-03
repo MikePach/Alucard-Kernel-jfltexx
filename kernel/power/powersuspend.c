@@ -45,6 +45,9 @@
 static unsigned int debug = 1;
 module_param_named(debug_mask, debug, uint, 0644);
 
+static unsigned int sleep_state = 0;
+module_param_named(sleep_state, sleep_state, uint, 0644);
+
 #define dprintk(msg...)		\
 do { 				\
 	if (debug)		\
@@ -63,7 +66,6 @@ static DEFINE_SPINLOCK(state_lock);
 
 /* Yank555.lu : Current powersave state (screen on / off) */
 static int state;
-
 /* Yank555.lu : Current powersave suspend_mode  (kernel / userspace / panel) */
 int suspend_mode;
 
@@ -112,6 +114,7 @@ static void power_suspend(struct work_struct *work)
 		}
 	}
 	dprintk("[POWERSUSPEND] suspend completed.\n");
+	sleep_state = 1;
 abort_suspend:
 	mutex_unlock(&power_suspend_lock);
 }
@@ -133,6 +136,7 @@ static void power_resume(struct work_struct *work)
 		goto abort_resume;
 
 	dprintk("[POWERSUSPEND] resuming...\n");
+	sleep_state = 0;
 	list_for_each_entry_reverse(pos, &power_suspend_handlers, link) {
 		if (pos->resume != NULL) {
 			pos->resume(pos);
@@ -143,6 +147,8 @@ abort_resume:
 	mutex_unlock(&power_suspend_lock);
 }
 
+bool power_suspended = false;
+
 void set_power_suspend_state(int new_state)
 {
 	unsigned long irqflags;
@@ -151,10 +157,12 @@ void set_power_suspend_state(int new_state)
 	if (state == POWER_SUSPEND_INACTIVE && new_state == POWER_SUSPEND_ACTIVE) {
 		dprintk("[POWERSUSPEND] state activated.\n");
 		state = new_state;
+		power_suspended = true;
 		queue_work(suspend_work_queue, &power_suspend_work);
 	} else if (state == POWER_SUSPEND_ACTIVE && new_state == POWER_SUSPEND_INACTIVE) {
 		dprintk("[POWERSUSPEND] state deactivated.\n");
 		state = new_state;
+		power_suspended = false;
 		queue_work(suspend_work_queue, &power_resume_work);
 	}
 	spin_unlock_irqrestore(&state_lock, irqflags);

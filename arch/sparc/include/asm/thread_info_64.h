@@ -261,6 +261,12 @@ static inline void set_restore_sigmask(void)
 	ti->status |= TS_RESTORE_SIGMASK;
 	set_bit(TIF_SIGPENDING, &ti->flags);
 }
+
+#define thread32_stack_is_64bit(__SP) (((__SP) & 0x1) != 0)
+#define test_thread_64bit_stack(__SP) \
+	((test_thread_flag(TIF_32BIT) && !thread32_stack_is_64bit(__SP)) ? \
+	 false : true)
+
 #endif	/* !__ASSEMBLY__ */
 
 #endif /* __KERNEL__ */

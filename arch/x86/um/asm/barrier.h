@@ -35,9 +35,9 @@
 
 #define smp_mb()	mb()
 #ifdef CONFIG_X86_PPRO_FENCE
-#define smp_rmb()	rmb()
+#define dma_rmb()	rmb()
 #else /* CONFIG_X86_PPRO_FENCE */
-#define smp_rmb()	barrier()
+#define dma_rmb()	barrier()
 #endif /* CONFIG_X86_PPRO_FENCE */
 
 #ifdef CONFIG_X86_OOSTORE

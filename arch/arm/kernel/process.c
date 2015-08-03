@@ -31,7 +31,6 @@
 #include <linux/uaccess.h>
 #include <linux/random.h>
 #include <linux/hw_breakpoint.h>
-#include <linux/cpuidle.h>
 #include <linux/console.h>
 
 #include <asm/cacheflush.h>
@@ -60,8 +59,6 @@ static const char *isa_modes[] = {
 
 extern void setup_mm_for_reboot(void);
 
-static volatile int hlt_counter;
-
 #ifdef CONFIG_SMP
 void arch_trigger_all_cpu_backtrace(void)
 {
@@ -73,41 +70,6 @@ void arch_trigger_all_cpu_backtrace(void)
 	dump_stack();
 }
 #endif
-
-void disable_hlt(void)
-{
-	hlt_counter++;
-}
-
-EXPORT_SYMBOL(disable_hlt);
-
-void enable_hlt(void)
-{
-	hlt_counter--;
-}
-
-EXPORT_SYMBOL(enable_hlt);
-
-int get_hlt(void)
-{
-	return hlt_counter;
-}
-EXPORT_SYMBOL(get_hlt);
-
-static int __init nohlt_setup(char *__unused)
-{
-	hlt_counter = 1;
-	return 1;
-}
-
-static int __init hlt_setup(char *__unused)
-{
-	hlt_counter = 0;
-	return 1;
-}
-
-__setup("nohlt", nohlt_setup);
-__setup("hlt", hlt_setup);
 
 extern void call_with_stack(void (*fn)(void *), void *arg, void *sp);
 typedef void (*phys_reset_t)(unsigned long);
@@ -205,26 +167,6 @@ EXPORT_SYMBOL(pm_power_off);
 void (*arm_pm_restart)(char str, const char *cmd) = null_restart;
 EXPORT_SYMBOL_GPL(arm_pm_restart);
 
-static void do_nothing(void *unused)
-{
-}
-
-/*
- * cpu_idle_wait - Used to ensure that all the CPUs discard old value of
- * pm_idle and update to new pm_idle value. Required while changing pm_idle
- * handler on SMP systems.
- *
- * Caller must have changed pm_idle to the new value before the call. Old
- * pm_idle value will not be used by any CPU after the return of this function.
- */
-void cpu_idle_wait(void)
-{
-	smp_mb();
-	/* kick all the CPUs so that they exit out of pm_idle */
-	smp_call_function(do_nothing, NULL, 1);
-}
-EXPORT_SYMBOL_GPL(cpu_idle_wait);
-
 /*
  * This is our default idle handler.
  */
@@ -232,7 +174,11 @@ EXPORT_SYMBOL_GPL(cpu_idle_wait);
 extern void arch_idle(void);
 void (*arm_pm_idle)(void) = arch_idle;
 
-static void default_idle(void)
+/*
+ * Called from the core idle loop.
+ */
+
+void arch_cpu_idle(void)
 {
 	if (arm_pm_idle)
 		arm_pm_idle();
@@ -241,59 +187,30 @@ static void default_idle(void)
 	local_irq_enable();
 }
 
-void (*pm_idle)(void) = default_idle;
-EXPORT_SYMBOL(pm_idle);
-
-/*
- * The idle thread, has rather strange semantics for calling pm_idle,
- * but this is what x86 does and we need to do the same, so that
- * things like cpuidle get called in the same way.  The only difference
- * is that we always respect 'hlt_counter' to prevent low power idle.
- */
-void cpu_idle(void)
+void arch_cpu_idle_prepare(void)
 {
 	local_fiq_enable();
-
-	/* endless idle loop with no priority at all */
-	while (1) {
-		idle_notifier_call_chain(IDLE_START);
-		tick_nohz_idle_enter();
-		rcu_idle_enter();
-		while (!need_resched()) {
-			/*
-			 * We need to disable interrupts here
-			 * to ensure we don't miss a wakeup call.
-			 */
-			local_irq_disable();
-#ifdef CONFIG_PL310_ERRATA_769419
-			wmb();
-#endif
-			if (hlt_counter) {
-				local_irq_enable();
-				cpu_relax();
-			} else if (!need_resched()) {
-				stop_critical_timings();
-				if (cpuidle_idle_call())
-					pm_idle();
-				start_critical_timings();
-				/*
-				 * pm_idle functions must always
-				 * return with IRQs enabled.
-				 */
-				WARN_ON(irqs_disabled());
-			} else
-				local_irq_enable();
-		}
-		rcu_idle_exit();
-		tick_nohz_idle_exit();
-		idle_notifier_call_chain(IDLE_END);
-		schedule_preempt_disabled();
-#ifdef CONFIG_HOTPLUG_CPU
-		if (cpu_is_offline(smp_processor_id()))
-			cpu_die();
-#endif
-	}
 }
+
+void arch_cpu_idle_enter(void)
+{
+	idle_notifier_call_chain(IDLE_START);
+#ifdef CONFIG_PL310_ERRATA_769419
+	wmb();
+#endif
+}
+
+void arch_cpu_idle_exit(void)
+{
+	idle_notifier_call_chain(IDLE_END);
+}
+
+#ifdef CONFIG_HOTPLUG_CPU
+void arch_cpu_idle_dead(void)
+{
+	cpu_die();
+}
+#endif
 
 static char reboot_mode = 'h';
 
@@ -351,6 +268,7 @@ void machine_halt(void)
  */
 void machine_power_off(void)
 {
+	preempt_disable();
 	smp_send_stop();
 
 	if (pm_power_off)
@@ -370,6 +288,7 @@ void machine_power_off(void)
  */
 void machine_restart(char *cmd)
 {
+	preempt_disable();
 	smp_send_stop();
 
 	/* Flush the console to make sure all the relevant messages make it
@@ -483,11 +402,8 @@ void __show_regs(struct pt_regs *regs)
 #endif
 	set_crash_store_enable();
 #endif
-	printk("CPU: %d    %s  (%s %.*s)\n",
-		raw_smp_processor_id(), print_tainted(),
-		init_utsname()->release,
-		(int)strcspn(init_utsname()->version, " "),
-		init_utsname()->version);
+	show_regs_print_info(KERN_DEFAULT);
+
 	print_symbol("PC is at %s\n", instruction_pointer(regs));
 	print_symbol("LR is at %s\n", regs->ARM_lr);
 #ifdef CONFIG_LGE_CRASH_HANDLER
@@ -558,7 +474,6 @@ void __show_regs(struct pt_regs *regs)
 void show_regs(struct pt_regs * regs)
 {
 	printk("\n");
-	printk("Pid: %d, comm: %20s\n", task_pid_nr(current), current->comm);
 	__show_regs(regs);
 	dump_stack();
 }
@@ -739,15 +654,15 @@ unsigned long arch_randomize_brk(struct mm_struct *mm)
  * atomic helpers. Insert it into the gate_vma so that it is visible
  * through ptrace and /proc/<pid>/mem.
  */
-static struct vm_area_struct gate_vma;
+static struct vm_area_struct gate_vma = {
+	.vm_start	= 0xffff0000,
+	.vm_end		= 0xffff0000 + PAGE_SIZE,
+	.vm_flags	= VM_READ | VM_EXEC | VM_MAYREAD | VM_MAYEXEC,
+};
 
 static int __init gate_vma_init(void)
 {
-	gate_vma.vm_start	= 0xffff0000;
-	gate_vma.vm_end		= 0xffff0000 + PAGE_SIZE;
-	gate_vma.vm_page_prot	= PAGE_READONLY_EXEC;
-	gate_vma.vm_flags	= VM_READ | VM_EXEC |
-				  VM_MAYREAD | VM_MAYEXEC;
+	gate_vma.vm_page_prot = PAGE_READONLY_EXEC;
 	return 0;
 }
 arch_initcall(gate_vma_init);

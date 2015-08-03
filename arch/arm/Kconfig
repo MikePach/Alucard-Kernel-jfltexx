@@ -41,6 +41,7 @@ config ARM
 	select GENERIC_PCI_IOMAP
 	select HAVE_BPF_JIT if NET
 	select GENERIC_SMP_IDLE_THREAD
+	select GENERIC_IDLE_POLL_SETUP
 	select GENERIC_STRNCPY_FROM_USER
 	select GENERIC_STRNLEN_USER
 	select ARCH_HAS_TICK_BROADCAST if GENERIC_CLOCKEVENTS_BROADCAST
@@ -205,9 +206,6 @@ config ARCH_HAS_CPUFREQ
 	  Internal node to signify that the ARCH has CPUFREQ support
 	  and that the relevant menu configurations are displayed for
 	  it.
-
-config ARCH_HAS_CPU_IDLE_WAIT
-       def_bool y
 
 config GENERIC_HWEIGHT
 	bool

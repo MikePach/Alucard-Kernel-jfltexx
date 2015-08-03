@@ -172,6 +172,7 @@ static inline void set_restore_sigmask(void)
 	ti->status |= TS_RESTORE_SIGMASK;
 	set_bit(TIF_SIGPENDING, (unsigned long *)&ti->flags);
 }
+
 #endif	/* !__ASSEMBLY__ */
 
 #endif /* __KERNEL__ */

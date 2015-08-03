@@ -81,9 +81,9 @@
 #ifdef CONFIG_SMP
 #define smp_mb()	mb()
 #ifdef CONFIG_X86_PPRO_FENCE
-# define smp_rmb()	rmb()
+#define dma_rmb()	rmb()
 #else
-# define smp_rmb()	barrier()
+#define dma_rmb()	barrier()
 #endif
 #ifdef CONFIG_X86_OOSTORE
 # define smp_wmb() 	wmb()
@@ -92,7 +92,7 @@
 #endif
 #define smp_read_barrier_depends()	read_barrier_depends()
 #define set_mb(var, value) do { (void)xchg(&var, value); } while (0)
-#else
+#else /* !SMP */
 #define smp_mb()	barrier()
 #define smp_rmb()	barrier()
 #define smp_wmb()	barrier()
