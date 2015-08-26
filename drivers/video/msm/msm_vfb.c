@@ -550,7 +550,7 @@ static int msm_vfb_mmap(struct fb_info *info,
 		return -EINVAL;	
 	}
 
-	vma->vm_flags    |= (VM_IO | VM_RESERVED);
+	/* VM_IO | VM_DONTEXPAND | VM_DONTDUMP are set by remap_pfn_range() */
 	vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
 
 	data = kmalloc(sizeof(*data), GFP_KERNEL);

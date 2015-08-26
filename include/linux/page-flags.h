@@ -110,15 +110,7 @@ enum pageflags {
 	PG_compound_lock,
 #endif
 	PG_readahead,		/* page in a readahead window */
-#ifdef CONFIG_KSM_CHECK_PAGE
-	PG_ksm_scan0,		/* page has been scanned by even KSM cycle */
-#endif
 	__NR_PAGEFLAGS,
-
-#ifdef CONFIG_KSM_CHECK_PAGE
-	/* page has been scanned by odd KSM cycle */
-	PG_ksm_scan1 = PG_owner_priv_1,
-#endif
 
 	/* Filesystems */
 	PG_checked = PG_owner_priv_1,
@@ -135,6 +127,13 @@ enum pageflags {
 
 	/* SLOB */
 	PG_slob_free = PG_private,
+#ifdef CONFIG_KSM_CHECK_PAGE
+	PG_ksm_scan0,		/* page has been scanned by even KSM cycle */
+#endif
+#ifdef CONFIG_KSM_CHECK_PAGE
+	/* page has been scanned by odd KSM cycle */
+	PG_ksm_scan1 = PG_owner_priv_1,
+#endif
 };
 
 #ifndef __GENERATING_BOUNDS_H
@@ -219,10 +218,6 @@ PAGEFLAG(Reserved, reserved) __CLEARPAGEFLAG(Reserved, reserved)
 PAGEFLAG(SwapBacked, swapbacked) __CLEARPAGEFLAG(SwapBacked, swapbacked)
 
 __PAGEFLAG(SlobFree, slob_free)
-#ifdef CONFIG_KSM_CHECK_PAGE
-CLEARPAGEFLAG(KsmScan0, ksm_scan0) TESTSETFLAG(KsmScan0, ksm_scan0)
-CLEARPAGEFLAG(KsmScan1, ksm_scan1) TESTSETFLAG(KsmScan1, ksm_scan1)
-#endif
 
 /*
  * Private page markings that may be used by the filesystem that owns the page
@@ -316,21 +311,13 @@ static inline void __SetPageUptodate(struct page *page)
 
 static inline void SetPageUptodate(struct page *page)
 {
-#ifdef CONFIG_S390
-	if (!test_and_set_bit(PG_uptodate, &page->flags))
-		page_set_storage_key(page_to_phys(page), PAGE_DEFAULT_KEY, 0);
-#else
 	/*
 	 * Memory barrier must be issued before setting the PG_uptodate bit,
 	 * so that all previous stores issued in order to bring the page
 	 * uptodate are actually visible before PageUptodate becomes true.
-	 *
-	 * s390 doesn't need an explicit smp_wmb here because the test and
-	 * set bit already provides full barriers.
 	 */
 	smp_wmb();
 	set_bit(PG_uptodate, &(page)->flags);
-#endif
 }
 
 CLEARPAGEFLAG(Uptodate, uptodate)

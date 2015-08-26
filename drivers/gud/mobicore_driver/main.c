@@ -83,7 +83,7 @@ static inline void free_continguous_pages(void *addr, unsigned int order)
 /* Frees the memory associated with a buffer */
 static int free_buffer(struct mc_buffer *buffer, bool unlock)
 {
-	struct mm_struct *mm = current->mm;
+	/*struct mm_struct *mm = current->mm;*/
 	if (buffer->handle == 0)
 		return -EINVAL;
 
@@ -93,12 +93,12 @@ static int free_buffer(struct mc_buffer *buffer, bool unlock)
 	MCDRV_DBG(mcd, "handle=%u phys_addr=0x%p, virt_addr=0x%p len=%u\n",
 		  buffer->handle, buffer->phys, buffer->addr, buffer->len);
 
-	if (unlock == false)
+	/*if (unlock == false)
 		if (do_munmap(mm, (long unsigned int)buffer->uaddr,
 			      buffer->len) < 0) {
 			MCDRV_DBG_ERROR(mcd, "Memory can't be unmapped\n");
 			return -EINVAL;
-	}
+	}*/
 
 	if (!atomic_dec_and_test(&buffer->usage)) {
 		MCDRV_DBG_VERBOSE(mcd, "Could not free %u", buffer->handle);
@@ -540,7 +540,7 @@ static int mc_fd_mmap(struct file *file, struct vm_area_struct *vmarea)
 
 found:
 		buffer->uaddr = (void *)vmarea->vm_start;
-		vmarea->vm_flags |= VM_RESERVED;
+		/* VM_DONTEXPAND | VM_DONTDUMP are set by remap_pfn_range() */
 		/*
 		 * Convert kernel address to user address. Kernel address begins
 		 * at PAGE_OFFSET, user address range is below PAGE_OFFSET.
@@ -560,7 +560,7 @@ found:
 		if (!paddr)
 			return -EFAULT;
 
-		vmarea->vm_flags |= VM_RESERVED;
+		/* VM_DONTEXPAND | VM_DONTDUMP are set by remap_pfn_range() */
 		/*
 		 * Convert kernel address to user address. Kernel address begins
 		 * at PAGE_OFFSET, user address range is below PAGE_OFFSET.
