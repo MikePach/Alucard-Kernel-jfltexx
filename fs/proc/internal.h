@@ -11,6 +11,7 @@
 
 #include <linux/proc_fs.h>
 struct  ctl_table_header;
+struct  mempolicy;
 
 extern struct proc_dir_entry proc_root;
 #ifdef CONFIG_PROC_SYSCTL
@@ -25,8 +26,6 @@ extern int proc_net_init(void);
 #else
 static inline int proc_net_init(void) { return 0; }
 #endif
-
-extern struct mm_struct *mm_for_maps(struct task_struct *);
 
 extern int proc_tid_stat(struct seq_file *m, struct pid_namespace *ns,
 				struct pid *pid, struct task_struct *task);
@@ -54,6 +53,9 @@ struct proc_maps_private {
 	struct task_struct *task;
 #ifdef CONFIG_MMU
 	struct vm_area_struct *tail_vma;
+#endif
+#ifdef CONFIG_NUMA
+	struct mempolicy *task_mempolicy;
 #endif
 };
 

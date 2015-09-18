@@ -61,6 +61,14 @@
 #include <linux/cgroup.h>
 
 /*
+ * Workqueue for cpuset related tasks.
+ *
+ * Using kevent workqueue may cause deadlock when memory_migrate
+ * is set. So we create a separate workqueue thread for cpuset.
+ */
+static struct workqueue_struct *cpuset_wq;
+
+/*
  * Tracks how many cpusets are currently defined in system.
  * When there is only one cpuset (the root cpuset) we can
  * short circuit some hooks.
@@ -99,8 +107,6 @@ struct cpuset {
 
 	/* used for walking a cpuset hierarchy */
 	struct list_head stack_list;
-
-	struct work_struct hotplug_work;
 };
 
 /* Retrieve the cpuset for a cgroup */
@@ -234,16 +240,6 @@ static char cpuset_nodelist[CPUSET_NODELIST_LEN];
 static DEFINE_SPINLOCK(cpuset_buffer_lock);
 
 /*
- * CPU / memory hotplug is handled asynchronously.
- */
-static struct workqueue_struct *cpuset_propagate_hotplug_wq;
-
-static void cpuset_hotplug_workfn(struct work_struct *work);
-static void cpuset_propagate_hotplug_workfn(struct work_struct *work);
-
-static DECLARE_WORK(cpuset_hotplug_work, cpuset_hotplug_workfn);
-
-/*
  * This is ugly, but preserves the userspace API for existing cpuset
  * users. If someone tries to mount the "cpuset" filesystem, we
  * silently switch it to mount "cgroup" instead
@@ -300,10 +296,10 @@ static void guarantee_online_cpus(const struct cpuset *cs,
  * are online, with memory.  If none are online with memory, walk
  * up the cpuset hierarchy until we find one that does have some
  * online mems.  If we get all the way to the top and still haven't
- * found any online mems, return node_states[N_HIGH_MEMORY].
+ * found any online mems, return node_states[N_MEMORY].
  *
  * One way or another, we guarantee to return some non-empty subset
- * of node_states[N_HIGH_MEMORY].
+ * of node_states[N_MEMORY].
  *
  * Call with callback_mutex held.
  */
@@ -311,14 +307,14 @@ static void guarantee_online_cpus(const struct cpuset *cs,
 static void guarantee_online_mems(const struct cpuset *cs, nodemask_t *pmask)
 {
 	while (cs && !nodes_intersects(cs->mems_allowed,
-					node_states[N_HIGH_MEMORY]))
+					node_states[N_MEMORY]))
 		cs = cs->parent;
 	if (cs)
 		nodes_and(*pmask, cs->mems_allowed,
-					node_states[N_HIGH_MEMORY]);
+					node_states[N_MEMORY]);
 	else
-		*pmask = node_states[N_HIGH_MEMORY];
-	BUG_ON(!nodes_intersects(*pmask, node_states[N_HIGH_MEMORY]));
+		*pmask = node_states[N_MEMORY];
+	BUG_ON(!nodes_intersects(*pmask, node_states[N_MEMORY]));
 }
 
 /*
@@ -724,50 +720,82 @@ done:
 /*
  * Rebuild scheduler domains.
  *
+ * Call with neither cgroup_mutex held nor within get_online_cpus().
+ * Takes both cgroup_mutex and get_online_cpus().
+ *
+ * Cannot be directly called from cpuset code handling changes
+ * to the cpuset pseudo-filesystem, because it cannot be called
+ * from code that already holds cgroup_mutex.
+ */
+static void do_rebuild_sched_domains(struct work_struct *unused)
+{
+	struct sched_domain_attr *attr;
+	cpumask_var_t *doms;
+	int ndoms;
+
+	get_online_cpus();
+
+	/* Generate domain masks and attrs */
+	cgroup_lock();
+	ndoms = generate_sched_domains(&doms, &attr);
+	cgroup_unlock();
+
+	/* Have scheduler rebuild the domains */
+	partition_sched_domains(ndoms, doms, attr);
+
+	put_online_cpus();
+}
+#else /* !CONFIG_SMP */
+static void do_rebuild_sched_domains(struct work_struct *unused)
+{
+}
+
+static int generate_sched_domains(cpumask_var_t **domains,
+			struct sched_domain_attr **attributes)
+{
+	*domains = NULL;
+	return 1;
+}
+#endif /* CONFIG_SMP */
+
+static DECLARE_WORK(rebuild_sched_domains_work, do_rebuild_sched_domains);
+
+/*
+ * Rebuild scheduler domains, asynchronously via workqueue.
+ *
  * If the flag 'sched_load_balance' of any cpuset with non-empty
  * 'cpus' changes, or if the 'cpus' allowed changes in any cpuset
  * which has that flag enabled, or if any cpuset with a non-empty
  * 'cpus' is removed, then call this routine to rebuild the
  * scheduler's dynamic sched domains.
  *
- * Call with cgroup_mutex held.  Takes get_online_cpus().
+ * The rebuild_sched_domains() and partition_sched_domains()
+ * routines must nest cgroup_lock() inside get_online_cpus(),
+ * but such cpuset changes as these must nest that locking the
+ * other way, holding cgroup_lock() for much of the code.
+ *
+ * So in order to avoid an ABBA deadlock, the cpuset code handling
+ * these user changes delegates the actual sched domain rebuilding
+ * to a separate workqueue thread, which ends up processing the
+ * above do_rebuild_sched_domains() function.
  */
-static void rebuild_sched_domains_locked(void)
+static void async_rebuild_sched_domains(void)
 {
-	struct sched_domain_attr *attr;
-	cpumask_var_t *doms;
-	int ndoms;
-
-	WARN_ON_ONCE(!cgroup_lock_is_held());
-	get_online_cpus();
-
-	/*
-	 * We have raced with CPU hotplug. Don't do anything to avoid
-	 * passing doms with offlined cpu to partition_sched_domains().
-	 * Anyways, hotplug work item will rebuild sched domains.
-	 */
-	if (!cpumask_equal(top_cpuset.cpus_allowed, cpu_active_mask))
-		goto out;
-
-	/* Generate domain masks and attrs */
-	ndoms = generate_sched_domains(&doms, &attr);
-
-	/* Have scheduler rebuild the domains */
-	partition_sched_domains(ndoms, doms, attr);
-out:
-	put_online_cpus();
+	queue_work(cpuset_wq, &rebuild_sched_domains_work);
 }
-#else /* !CONFIG_SMP */
-static void rebuild_sched_domains_locked(void)
-{
-}
-#endif /* CONFIG_SMP */
 
+/*
+ * Accomplishes the same scheduler domain rebuild as the above
+ * async_rebuild_sched_domains(), however it directly calls the
+ * rebuild routine synchronously rather than calling it via an
+ * asynchronous work thread.
+ *
+ * This can only be called from code that is not holding
+ * cgroup_mutex (not nested in a cgroup_lock() call.)
+ */
 void rebuild_sched_domains(void)
 {
-	cgroup_lock();
-	rebuild_sched_domains_locked();
-	cgroup_unlock();
+	do_rebuild_sched_domains(NULL);
 }
 
 /**
@@ -887,7 +915,7 @@ static int update_cpumask(struct cpuset *cs, struct cpuset *trialcs,
 	heap_free(&heap);
 
 	if (is_load_balanced)
-		rebuild_sched_domains_locked();
+		async_rebuild_sched_domains();
 	return 0;
 }
 
@@ -1071,7 +1099,7 @@ static int update_nodemask(struct cpuset *cs, struct cpuset *trialcs,
 		return -ENOMEM;
 
 	/*
-	 * top_cpuset.mems_allowed tracks node_stats[N_HIGH_MEMORY];
+	 * top_cpuset.mems_allowed tracks node_stats[N_MEMORY];
 	 * it's read-only
 	 */
 	if (cs == &top_cpuset) {
@@ -1093,7 +1121,7 @@ static int update_nodemask(struct cpuset *cs, struct cpuset *trialcs,
 			goto done;
 
 		if (!nodes_subset(trialcs->mems_allowed,
-				node_states[N_HIGH_MEMORY])) {
+				node_states[N_MEMORY])) {
 			retval =  -EINVAL;
 			goto done;
 		}
@@ -1145,7 +1173,7 @@ static int update_relax_domain_level(struct cpuset *cs, s64 val)
 		cs->relax_domain_level = val;
 		if (!cpumask_empty(cs->cpus_allowed) &&
 		    is_sched_load_balance(cs))
-			rebuild_sched_domains_locked();
+			async_rebuild_sched_domains();
 	}
 
 	return 0;
@@ -1237,7 +1265,7 @@ static int update_flag(cpuset_flagbits_t bit, struct cpuset *cs,
 	mutex_unlock(&callback_mutex);
 
 	if (!cpumask_empty(trialcs->cpus_allowed) && balance_flag_changed)
-		rebuild_sched_domains_locked();
+		async_rebuild_sched_domains();
 
 	if (spread_flag_changed)
 		update_tasks_flags(cs, &heap);
@@ -1345,6 +1373,15 @@ static int fmeter_getrate(struct fmeter *fmp)
 	return val;
 }
 
+/*
+ * Protected by cgroup_lock. The nodemasks must be stored globally because
+ * dynamically allocating them is not allowed in can_attach, and they must
+ * persist until attach.
+ */
+static cpumask_var_t cpus_attach;
+static nodemask_t cpuset_attach_nodemask_from;
+static nodemask_t cpuset_attach_nodemask_to;
+
 /* Called by cgroups to determine if a cpuset is usable; cgroup_mutex held */
 static int cpuset_can_attach(struct cgroup *cgrp, struct cgroup_taskset *tset)
 {
@@ -1371,28 +1408,6 @@ static int cpuset_can_attach(struct cgroup *cgrp, struct cgroup_taskset *tset)
 			return ret;
 	}
 
-	return 0;
-}
-
-/*
- * Protected by cgroup_mutex.  cpus_attach is used only by cpuset_attach()
- * but we can't allocate it dynamically there.  Define it global and
- * allocate from cpuset_init().
- */
-static cpumask_var_t cpus_attach;
-
-static void cpuset_attach(struct cgroup *cgrp, struct cgroup_taskset *tset)
-{
-	/* static bufs protected by cgroup_mutex */
-	static nodemask_t cpuset_attach_nodemask_from;
-	static nodemask_t cpuset_attach_nodemask_to;
-	struct mm_struct *mm;
-	struct task_struct *task;
-	struct task_struct *leader = cgroup_taskset_first(tset);
-	struct cgroup *oldcgrp = cgroup_taskset_cur_cgroup(tset);
-	struct cpuset *cs = cgroup_cs(cgrp);
-	struct cpuset *oldcs = cgroup_cs(oldcgrp);
-
 	/* prepare for attach */
 	if (cs == &top_cpuset)
 		cpumask_copy(cpus_attach, cpu_possible_mask);
@@ -1400,6 +1415,18 @@ static void cpuset_attach(struct cgroup *cgrp, struct cgroup_taskset *tset)
 		guarantee_online_cpus(cs, cpus_attach);
 
 	guarantee_online_mems(cs, &cpuset_attach_nodemask_to);
+
+	return 0;
+}
+
+static void cpuset_attach(struct cgroup *cgrp, struct cgroup_taskset *tset)
+{
+	struct mm_struct *mm;
+	struct task_struct *task;
+	struct task_struct *leader = cgroup_taskset_first(tset);
+	struct cgroup *oldcgrp = cgroup_taskset_cur_cgroup(tset);
+	struct cpuset *cs = cgroup_cs(cgrp);
+	struct cpuset *oldcs = cgroup_cs(oldcgrp);
 
 	cgroup_taskset_for_each(task, cgrp, tset) {
 		/*
@@ -1520,19 +1547,6 @@ static int cpuset_write_resmask(struct cgroup *cgrp, struct cftype *cft,
 	int retval = 0;
 	struct cpuset *cs = cgroup_cs(cgrp);
 	struct cpuset *trialcs;
-
-	/*
-	 * CPU or memory hotunplug may leave @cs w/o any execution
-	 * resources, in which case the hotplug code asynchronously updates
-	 * configuration and transfers all tasks to the nearest ancestor
-	 * which can execute.
-	 *
-	 * As writes to "cpus" or "mems" may restore @cs's execution
-	 * resources, wait for the previously scheduled operations before
-	 * proceeding, so that we don't end up keep removing tasks added
-	 * after execution capability is restored.
-	 */
-	flush_work(&cpuset_hotplug_work);
 
 	if (!cgroup_lock_live_group(cgrp))
 		return -ENODEV;
@@ -1842,7 +1856,6 @@ static struct cgroup_subsys_state *cpuset_create(struct cgroup *cont)
 	cpumask_clear(cs->cpus_allowed);
 	nodes_clear(cs->mems_allowed);
 	fmeter_init(&cs->fmeter);
-	INIT_WORK(&cs->hotplug_work, cpuset_propagate_hotplug_workfn);
 	cs->relax_domain_level = -1;
 
 	cs->parent = parent;
@@ -1853,7 +1866,7 @@ static struct cgroup_subsys_state *cpuset_create(struct cgroup *cont)
 /*
  * If the cpuset being removed has its flag 'sched_load_balance'
  * enabled, then simulate turning sched_load_balance off, which
- * will call rebuild_sched_domains_locked().
+ * will call async_rebuild_sched_domains().
  */
 
 static void cpuset_destroy(struct cgroup *cont)
@@ -1968,6 +1981,14 @@ static void remove_tasks_in_empty_cpuset(struct cpuset *cs)
 	struct cpuset *parent;
 
 	/*
+	 * The cgroup's css_sets list is in use if there are tasks
+	 * in the cpuset; the list is empty if there are none;
+	 * the cs->css.refcnt seems always 0.
+	 */
+	if (list_empty(&cs->css.cgroup->css_sets))
+		return;
+
+	/*
 	 * Find its next-highest non-empty parent, (top cpuset
 	 * has online cpus, so can't be empty).
 	 */
@@ -1980,209 +2001,128 @@ static void remove_tasks_in_empty_cpuset(struct cpuset *cs)
 }
 
 /*
- * Helper function to traverse cpusets.
- * It can be used to walk the cpuset tree from top to bottom, completing
- * one layer before dropping down to the next (thus always processing a
- * node before any of its children).
+ * Walk the specified cpuset subtree and look for empty cpusets.
+ * The tasks of such cpuset must be moved to a parent cpuset.
+ *
+ * Called with cgroup_mutex held.  We take callback_mutex to modify
+ * cpus_allowed and mems_allowed.
+ *
+ * This walk processes the tree from top to bottom, completing one layer
+ * before dropping down to the next.  It always processes a node before
+ * any of its children.
+ *
+ * For now, since we lack memory hot unplug, we'll never see a cpuset
+ * that has tasks along with an empty 'mems'.  But if we did see such
+ * a cpuset, we'd handle it just like we do if its 'cpus' was empty.
  */
-static struct cpuset *cpuset_next(struct list_head *queue)
+static void scan_for_empty_cpusets(struct cpuset *root)
 {
-	struct cpuset *cp;
+	LIST_HEAD(queue);
+	struct cpuset *cp;	/* scans cpusets being updated */
 	struct cpuset *child;	/* scans child cpusets of cp */
 	struct cgroup *cont;
+	static nodemask_t oldmems;	/* protected by cgroup_mutex */
 
-	if (list_empty(queue))
-		return NULL;
+	list_add_tail((struct list_head *)&root->stack_list, &queue);
 
-	cp = list_first_entry(queue, struct cpuset, stack_list);
-	list_del(queue->next);
-	list_for_each_entry(cont, &cp->css.cgroup->children, sibling) {
-		child = cgroup_cs(cont);
-		list_add_tail(&child->stack_list, queue);
-	}
+	while (!list_empty(&queue)) {
+		cp = list_first_entry(&queue, struct cpuset, stack_list);
+		list_del(queue.next);
+		list_for_each_entry(cont, &cp->css.cgroup->children, sibling) {
+			child = cgroup_cs(cont);
+			list_add_tail(&child->stack_list, &queue);
+		}
 
-	return cp;
-}
+		/* Continue past cpusets with all cpus, mems online */
+		if (cpumask_subset(cp->cpus_allowed, cpu_active_mask) &&
+		    nodes_subset(cp->mems_allowed, node_states[N_MEMORY]))
+			continue;
 
-/**
- * cpuset_propagate_hotplug_workfn - propagate CPU/memory hotplug to a cpuset
- * @cs: cpuset in interest
- *
- * Compare @cs's cpu and mem masks against top_cpuset and if some have gone
- * offline, update @cs accordingly.  If @cs ends up with no CPU or memory,
- * all its tasks are moved to the nearest ancestor with both resources.
- */
-static void cpuset_propagate_hotplug_workfn(struct work_struct *work)
-{
-	static cpumask_t off_cpus;
-	static nodemask_t off_mems, tmp_mems;
-	struct cpuset *cs = container_of(work, struct cpuset, hotplug_work);
+		oldmems = cp->mems_allowed;
 
-	cgroup_lock();
-
-	cpumask_andnot(&off_cpus, cs->cpus_allowed, top_cpuset.cpus_allowed);
-	nodes_andnot(off_mems, cs->mems_allowed, top_cpuset.mems_allowed);
-
-	/* remove offline cpus from @cs */
-	if (!cpumask_empty(&off_cpus)) {
+		/* Remove offline cpus and mems from this cpuset. */
 		mutex_lock(&callback_mutex);
-		cpumask_andnot(cs->cpus_allowed, cs->cpus_allowed, &off_cpus);
+		cpumask_and(cp->cpus_allowed, cp->cpus_allowed,
+			    cpu_active_mask);
+		nodes_and(cp->mems_allowed, cp->mems_allowed,
+						node_states[N_MEMORY]);
 		mutex_unlock(&callback_mutex);
-		update_tasks_cpumask(cs, NULL);
+
+		/* Move tasks from the empty cpuset to a parent */
+		if (cpumask_empty(cp->cpus_allowed) ||
+		     nodes_empty(cp->mems_allowed))
+			remove_tasks_in_empty_cpuset(cp);
+		else {
+			update_tasks_cpumask(cp, NULL);
+			update_tasks_nodemask(cp, &oldmems, NULL);
+		}
 	}
-
-	/* remove offline mems from @cs */
-	if (!nodes_empty(off_mems)) {
-		tmp_mems = cs->mems_allowed;
-		mutex_lock(&callback_mutex);
-		nodes_andnot(cs->mems_allowed, cs->mems_allowed, off_mems);
-		mutex_unlock(&callback_mutex);
-		update_tasks_nodemask(cs, &tmp_mems, NULL);
-	}
-
-	if (cpumask_empty(cs->cpus_allowed) || nodes_empty(cs->mems_allowed))
-		remove_tasks_in_empty_cpuset(cs);
-
-	cgroup_unlock();
-
-	/* the following may free @cs, should be the last operation */
-	css_put(&cs->css);
-}
-
-/**
- * schedule_cpuset_propagate_hotplug - schedule hotplug propagation to a cpuset
- * @cs: cpuset of interest
- *
- * Schedule cpuset_propagate_hotplug_workfn() which will update CPU and
- * memory masks according to top_cpuset.
- */
-static void schedule_cpuset_propagate_hotplug(struct cpuset *cs)
-{
-	/*
-	 * Pin @cs.  The refcnt will be released when the work item
-	 * finishes executing.
-	 */
-	if (!css_tryget(&cs->css))
-		return;
-
-	/*
-	 * Queue @cs->hotplug_work.  If already pending, lose the css ref.
-	 * cpuset_propagate_hotplug_wq is ordered and propagation will
-	 * happen in the order this function is called.
-	 */
-	if (!queue_work(cpuset_propagate_hotplug_wq, &cs->hotplug_work))
-		css_put(&cs->css);
-}
-
-/**
- * cpuset_hotplug_workfn - handle CPU/memory hotunplug for a cpuset
- *
- * This function is called after either CPU or memory configuration has
- * changed and updates cpuset accordingly.  The top_cpuset is always
- * synchronized to cpu_active_mask and N_MEMORY, which is necessary in
- * order to make cpusets transparent (of no affect) on systems that are
- * actively using CPU hotplug but making no active use of cpusets.
- *
- * Non-root cpusets are only affected by offlining.  If any CPUs or memory
- * nodes have been taken down, cpuset_propagate_hotplug() is invoked on all
- * descendants.
- *
- * Note that CPU offlining during suspend is ignored.  We don't modify
- * cpusets across suspend/resume cycles at all.
- */
-static void cpuset_hotplug_workfn(struct work_struct *work)
-{
-	static cpumask_t new_cpus, tmp_cpus;
-	static nodemask_t new_mems, tmp_mems;
-	bool cpus_updated, mems_updated;
-	bool cpus_offlined, mems_offlined;
-
-	cgroup_lock();
-
-	/* fetch the available cpus/mems and find out which changed how */
-	cpumask_copy(&new_cpus, cpu_active_mask);
-	new_mems = node_states[N_HIGH_MEMORY];
-
-	cpus_updated = !cpumask_equal(top_cpuset.cpus_allowed, &new_cpus);
-	cpus_offlined = cpumask_andnot(&tmp_cpus, top_cpuset.cpus_allowed,
-				       &new_cpus);
-
-	mems_updated = !nodes_equal(top_cpuset.mems_allowed, new_mems);
-	nodes_andnot(tmp_mems, top_cpuset.mems_allowed, new_mems);
-	mems_offlined = !nodes_empty(tmp_mems);
-
-	/* synchronize cpus_allowed to cpu_active_mask */
-	if (cpus_updated) {
-		mutex_lock(&callback_mutex);
-		cpumask_copy(top_cpuset.cpus_allowed, &new_cpus);
-		mutex_unlock(&callback_mutex);
-		/* we don't mess with cpumasks of tasks in top_cpuset */
-	}
-
-	/* synchronize mems_allowed to N_MEMORY */
-	if (mems_updated) {
-		tmp_mems = top_cpuset.mems_allowed;
-		mutex_lock(&callback_mutex);
-		top_cpuset.mems_allowed = new_mems;
-		mutex_unlock(&callback_mutex);
-		update_tasks_nodemask(&top_cpuset, &tmp_mems, NULL);
-	}
-
-	/* if cpus or mems went down, we need to propagate to descendants */
-	if (cpus_offlined || mems_offlined) {
-		struct cpuset *cs;
-		LIST_HEAD(queue);
-
-		list_add_tail(&top_cpuset.stack_list, &queue);
-		while ((cs = cpuset_next(&queue)))
-			if (cs != &top_cpuset)
-				schedule_cpuset_propagate_hotplug(cs);
-	}
-
-	cgroup_unlock();
-
-	/* wait for propagations to finish */
-	flush_workqueue(cpuset_propagate_hotplug_wq);
-
-	/* rebuild sched domains if cpus_allowed has changed */
-	if (cpus_updated) {
-		struct sched_domain_attr *attr;
-		cpumask_var_t *doms;
-		int ndoms;
-
-		cgroup_lock();
-		ndoms = generate_sched_domains(&doms, &attr);
-		cgroup_unlock();
-
-		partition_sched_domains(ndoms, doms, attr);
-	}
-}
-
-void cpuset_update_active_cpus(bool cpu_online)
-{
-	/*
-	 * We're inside cpu hotplug critical region which usually nests
-	 * inside cgroup synchronization.  Bounce actual hotplug processing
-	 * to a work item to avoid reverse locking order.
-	 *
-	 * We still need to do partition_sched_domains() synchronously;
-	 * otherwise, the scheduler will get confused and put tasks to the
-	 * dead CPU.  Fall back to the default single domain.
-	 * cpuset_hotplug_workfn() will rebuild it as necessary.
-	 */
-	partition_sched_domains(1, NULL, NULL);
-	schedule_work(&cpuset_hotplug_work);
 }
 
 /*
- * Keep top_cpuset.mems_allowed tracking node_states[N_HIGH_MEMORY].
- * Call this routine anytime after node_states[N_HIGH_MEMORY] changes.
- * See cpuset_update_active_cpus() for CPU hotplug handling.
+ * The top_cpuset tracks what CPUs and Memory Nodes are online,
+ * period.  This is necessary in order to make cpusets transparent
+ * (of no affect) on systems that are actively using CPU hotplug
+ * but making no active use of cpusets.
+ *
+ * The only exception to this is suspend/resume, where we don't
+ * modify cpusets at all.
+ *
+ * This routine ensures that top_cpuset.cpus_allowed tracks
+ * cpu_active_mask on each CPU hotplug (cpuhp) event.
+ *
+ * Called within get_online_cpus().  Needs to call cgroup_lock()
+ * before calling generate_sched_domains().
+ */
+void cpuset_update_active_cpus(void)
+{
+	struct sched_domain_attr *attr;
+	cpumask_var_t *doms;
+	int ndoms;
+
+	cgroup_lock();
+	mutex_lock(&callback_mutex);
+	cpumask_copy(top_cpuset.cpus_allowed, cpu_active_mask);
+	mutex_unlock(&callback_mutex);
+	scan_for_empty_cpusets(&top_cpuset);
+	ndoms = generate_sched_domains(&doms, &attr);
+	cgroup_unlock();
+
+	/* Have scheduler rebuild the domains */
+	partition_sched_domains(ndoms, doms, attr);
+}
+
+/*
+ * Keep top_cpuset.mems_allowed tracking node_states[N_MEMORY].
+ * Call this routine anytime after node_states[N_MEMORY] changes.
+ * See also the previous routine cpuset_track_online_cpus().
  */
 static int cpuset_track_online_nodes(struct notifier_block *self,
 				unsigned long action, void *arg)
 {
-	schedule_work(&cpuset_hotplug_work);
+	static nodemask_t oldmems;	/* protected by cgroup_mutex */
+
+	cgroup_lock();
+	switch (action) {
+	case MEM_ONLINE:
+		oldmems = top_cpuset.mems_allowed;
+		mutex_lock(&callback_mutex);
+		top_cpuset.mems_allowed = node_states[N_MEMORY];
+		mutex_unlock(&callback_mutex);
+		update_tasks_nodemask(&top_cpuset, &oldmems, NULL);
+		break;
+	case MEM_OFFLINE:
+		/*
+		 * needn't update top_cpuset.mems_allowed explicitly because
+		 * scan_for_empty_cpusets() will update it.
+		 */
+		scan_for_empty_cpusets(&top_cpuset);
+		break;
+	default:
+		break;
+	}
+	cgroup_unlock();
+
 	return NOTIFY_OK;
 }
 
@@ -2199,13 +2139,12 @@ static struct notifier_block cpuset_track_online_nodes_nb = {
 void __init cpuset_init_smp(void)
 {
 	cpumask_copy(top_cpuset.cpus_allowed, cpu_active_mask);
-	top_cpuset.mems_allowed = node_states[N_HIGH_MEMORY];
+	top_cpuset.mems_allowed = node_states[N_MEMORY];
 
 	register_hotmemory_notifier(&cpuset_track_online_nodes_nb);
 
-	cpuset_propagate_hotplug_wq =
-		alloc_ordered_workqueue("cpuset_hotplug", 0);
-	BUG_ON(!cpuset_propagate_hotplug_wq);
+	cpuset_wq = create_singlethread_workqueue("cpuset");
+	BUG_ON(!cpuset_wq);
 }
 
 /**
@@ -2268,7 +2207,7 @@ void cpuset_init_current_mems_allowed(void)
  *
  * Description: Returns the nodemask_t mems_allowed of the cpuset
  * attached to the specified @tsk.  Guaranteed to return some non-empty
- * subset of node_states[N_HIGH_MEMORY], even if this means going outside the
+ * subset of node_states[N_MEMORY], even if this means going outside the
  * tasks cpuset.
  **/
 
@@ -2440,6 +2379,17 @@ int __cpuset_node_allowed_hardwall(int node, gfp_t gfp_mask)
 	if (unlikely(test_thread_flag(TIF_MEMDIE)))
 		return 1;
 	return 0;
+}
+
+/**
+ * cpuset_unlock - release lock on cpuset changes
+ *
+ * Undo the lock taken in a previous cpuset_lock() call.
+ */
+
+void cpuset_unlock(void)
+{
+	mutex_unlock(&callback_mutex);
 }
 
 /**

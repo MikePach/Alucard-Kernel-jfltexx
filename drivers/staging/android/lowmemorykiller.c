@@ -151,7 +151,7 @@ int adjust_minadj(short *min_score_adj)
 static int lmk_vmpressure_notifier(struct notifier_block *nb,
 			unsigned long action, void *data)
 {
-	int other_free, other_file;
+	int other_free = 0, other_file = 0;
 	unsigned long pressure = action;
 	int array_size = ARRAY_SIZE(lowmem_adj);
 
@@ -184,6 +184,15 @@ static int lmk_vmpressure_notifier(struct notifier_block *nb,
 				trace_almk_vmpressure(pressure, other_free,
 					other_file);
 		}
+	} else if (atomic_read(&shift_adj)) {
+		/*
+		 * shift_adj would have been set by a previous invocation
+		 * of notifier, which is not followed by a lowmem_shrink yet.
+		 * Since vmpressure has improved, reset shift_adj to avoid
+		 * false adaptive LMK trigger.
+		 */
+		trace_almk_vmpressure(pressure, other_free, other_file);
+		atomic_set(&shift_adj, 0);
 	}
 
 	return 0;
@@ -548,9 +557,11 @@ static int lowmem_shrink(struct shrinker *s, struct shrink_control *sc)
 
 		if (time_before_eq(jiffies, lowmem_deathpending_timeout)) {
 			if (test_task_flag(tsk, TIF_MEMDIE)) {
+				int same_tgid = same_thread_group(current, tsk);
+
 				rcu_read_unlock();
 				/* give the system time to free up the memory */
-				if (!same_thread_group(current, tsk))
+				if (!same_tgid)
 					msleep_interruptible(20);
 				else
 					set_tsk_thread_flag(current,
@@ -847,11 +858,14 @@ static const struct kparam_array __param_arr_adj = {
 #ifdef CONFIG_ANDROID_LMK_ADJ_RBTREE
 DEFINE_SPINLOCK(lmk_lock);
 struct rb_root tasks_scoreadj = RB_ROOT;
+/*
+ * Makesure to invoke the function with holding sighand->siglock
+ */
 void add_2_adj_tree(struct task_struct *task)
 {
 	struct rb_node **link;
 	struct rb_node *parent = NULL;
-	struct task_struct *task_entry;
+	struct signal_struct *sig_entry;
 	s64 key = task->signal->oom_score_adj;
 
 	/*
@@ -861,25 +875,28 @@ void add_2_adj_tree(struct task_struct *task)
 	link =  &tasks_scoreadj.rb_node;
 	while (*link) {
 		parent = *link;
-		task_entry = rb_entry(parent, struct task_struct, adj_node);
+		sig_entry = rb_entry(parent, struct signal_struct, adj_node);
 
-		if (key < task_entry->signal->oom_score_adj)
+		if (key < sig_entry->oom_score_adj)
 			link = &parent->rb_right;
 		else
 			link = &parent->rb_left;
 	}
 
-	rb_link_node(&task->adj_node, parent, link);
-	rb_insert_color(&task->adj_node, &tasks_scoreadj);
+	rb_link_node(&task->signal->adj_node, parent, link);
+	rb_insert_color(&task->signal->adj_node, &tasks_scoreadj);
 	spin_unlock(&lmk_lock);
 }
 
+/*
+ * Makesure to invoke the function with holding sighand->siglock
+ */
 void delete_from_adj_tree(struct task_struct *task)
 {
 	spin_lock(&lmk_lock);
-	if (!RB_EMPTY_NODE(&task->adj_node)) {
-		rb_erase(&task->adj_node, &tasks_scoreadj);
-		RB_CLEAR_NODE(&task->adj_node);
+	if (!RB_EMPTY_NODE(&task->signal->adj_node)) {
+		rb_erase(&task->signal->adj_node, &tasks_scoreadj);
+		RB_CLEAR_NODE(&task->signal->adj_node);
 	}
 	spin_unlock(&lmk_lock);
 }
@@ -887,20 +904,23 @@ void delete_from_adj_tree(struct task_struct *task)
 static struct task_struct *pick_next_from_adj_tree(struct task_struct *task)
 {
 	struct rb_node *next;
+	struct signal_struct *next_tsk_sig;
 
 	spin_lock(&lmk_lock);
-	next = rb_next(&task->adj_node);
+	next = rb_next(&task->signal->adj_node);
 	spin_unlock(&lmk_lock);
 
 	if (!next)
 		return NULL;
 
-	return rb_entry(next, struct task_struct, adj_node);
+	next_tsk_sig = rb_entry(next, struct signal_struct, adj_node);
+	return next_tsk_sig->curr_target->group_leader;
 }
 
 static struct task_struct *pick_first_task(void)
 {
 	struct rb_node *left;
+	struct signal_struct *first_tsk_sig;
 
 	spin_lock(&lmk_lock);
 	left = rb_first(&tasks_scoreadj);
@@ -909,12 +929,14 @@ static struct task_struct *pick_first_task(void)
 	if (!left)
 		return NULL;
 
-	return rb_entry(left, struct task_struct, adj_node);
+	first_tsk_sig = rb_entry(left, struct signal_struct, adj_node);
+	return first_tsk_sig->curr_target->group_leader;
 }
 
 static struct task_struct *pick_last_task(void)
 {
 	struct rb_node *right;
+	struct signal_struct *last_tsk_sig;
 
 	spin_lock(&lmk_lock);
 	right = rb_last(&tasks_scoreadj);
@@ -923,7 +945,8 @@ static struct task_struct *pick_last_task(void)
 	if (!right)
 		return NULL;
 
-	return rb_entry(right, struct task_struct, adj_node);
+	last_tsk_sig = rb_entry(right, struct signal_struct, adj_node);
+	return last_tsk_sig->curr_target->group_leader;
 }
 #endif
 

@@ -319,29 +319,29 @@ loff_t seq_lseek(struct file *file, loff_t offset, int origin)
 	mutex_lock(&m->lock);
 	m->version = file->f_version;
 	switch (origin) {
-		case 1:
-			offset += file->f_pos;
-		case 0:
-			if (offset < 0)
-				break;
-			retval = offset;
-			if (offset != m->read_pos) {
-				while ((retval=traverse(m, offset)) == -EAGAIN)
-					;
-				if (retval) {
-					/* with extreme prejudice... */
-					file->f_pos = 0;
-					m->read_pos = 0;
-					m->version = 0;
-					m->index = 0;
-					m->count = 0;
-				} else {
-					m->read_pos = offset;
-					retval = file->f_pos = offset;
-				}
+	case SEEK_CUR:
+		offset += file->f_pos;
+	case SEEK_SET:
+		if (offset < 0)
+			break;
+		retval = offset;
+		if (offset != m->read_pos) {
+			while ((retval = traverse(m, offset)) == -EAGAIN)
+				;
+			if (retval) {
+				/* with extreme prejudice... */
+				file->f_pos = 0;
+				m->read_pos = 0;
+				m->version = 0;
+				m->index = 0;
+				m->count = 0;
 			} else {
-				file->f_pos = offset;
+				m->read_pos = offset;
+				retval = file->f_pos = offset;
 			}
+		} else {
+			file->f_pos = offset;
+		}
 	}
 	file->f_version = m->version;
 	mutex_unlock(&m->lock);
@@ -402,15 +402,12 @@ int seq_escape(struct seq_file *m, const char *s, const char *esc)
 }
 EXPORT_SYMBOL(seq_escape);
 
-int seq_printf(struct seq_file *m, const char *f, ...)
+int seq_vprintf(struct seq_file *m, const char *f, va_list args)
 {
-	va_list args;
 	int len;
 
 	if (m->count < m->size) {
-		va_start(args, f);
 		len = vsnprintf(m->buf + m->count, m->size - m->count, f, args);
-		va_end(args);
 		if (m->count + len < m->size) {
 			m->count += len;
 			return 0;
@@ -418,6 +415,19 @@ int seq_printf(struct seq_file *m, const char *f, ...)
 	}
 	seq_set_overflow(m);
 	return -1;
+}
+EXPORT_SYMBOL(seq_vprintf);
+
+int seq_printf(struct seq_file *m, const char *f, ...)
+{
+	int ret;
+	va_list args;
+
+	va_start(args, f);
+	ret = seq_vprintf(m, f, args);
+	va_end(args);
+
+	return ret;
 }
 EXPORT_SYMBOL(seq_printf);
 

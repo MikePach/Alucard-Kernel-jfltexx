@@ -21,11 +21,9 @@
 #include <linux/init.h>
 #include <linux/kexec.h>
 #include <linux/of_fdt.h>
-#include <linux/root_dev.h>
 #include <linux/cpu.h>
 #include <linux/interrupt.h>
 #include <linux/smp.h>
-#include <linux/fs.h>
 #include <linux/proc_fs.h>
 #include <linux/memblock.h>
 #include <linux/bug.h>
@@ -57,14 +55,8 @@
 #include <asm/memblock.h>
 #include <asm/virt.h>
 
-#if defined(CONFIG_DEPRECATED_PARAM_STRUCT)
-#include "compat.h"
-#endif
 #include "atags.h"
 
-#ifndef MEM_SIZE
-#define MEM_SIZE	(16*1024*1024)
-#endif
 
 #if defined(CONFIG_FPE_NWFPE) || defined(CONFIG_FPE_FASTFPE)
 char fpe_type[8];
@@ -78,10 +70,10 @@ static int __init fpe_setup(char *line)
 __setup("fpe=", fpe_setup);
 #endif
 
-extern void paging_init(struct machine_desc *desc);
+extern void paging_init(const struct machine_desc *desc);
 extern void sanity_check_meminfo(void);
-extern void reboot_setup(char *str);
-extern void setup_dma_zone(struct machine_desc *desc);
+extern void reboot_setup(const char *str);
+extern void setup_dma_zone(const struct machine_desc *desc);
 
 unsigned int processor_id;
 EXPORT_SYMBOL(processor_id);
@@ -145,9 +137,8 @@ EXPORT_SYMBOL(elf_platform);
 static const char *cpu_name;
 static const char *machine_name;
 static char __initdata cmd_line[COMMAND_LINE_SIZE];
-struct machine_desc *machine_desc __initdata;
+const struct machine_desc *machine_desc __initdata;
 
-static char default_command_line[COMMAND_LINE_SIZE] __initdata = CONFIG_CMDLINE;
 static union { char c[4]; unsigned long l; } endian_test __initdata = { { 'l', '?', '?', 'b' } };
 #define ENDIANNESS ((char)endian_test.l)
 
@@ -585,7 +576,7 @@ static void __init setup_processor(void)
 
 void __init dump_machine_table(void)
 {
-	struct machine_desc *p;
+	const struct machine_desc *p;
 
 	early_print("Available machine support:\n\nID (hex)\tNAME\n");
 	for_each_machine_desc(p)
@@ -600,6 +591,7 @@ void __init dump_machine_table(void)
 int __init arm_add_memory(phys_addr_t start, phys_addr_t size)
 {
 	struct membank *bank = &meminfo.bank[meminfo.nr_banks];
+	u64 aligned_start;
 
 	if (meminfo.nr_banks >= NR_BANKS) {
 		printk(KERN_CRIT "NR_BANKS too low, "
@@ -612,10 +604,16 @@ int __init arm_add_memory(phys_addr_t start, phys_addr_t size)
 	 * Size is appropriately rounded down, start is rounded up.
 	 */
 	size -= start & ~PAGE_MASK;
-	bank->start = PAGE_ALIGN(start);
+	aligned_start = PAGE_ALIGN(start);
 
-#ifndef CONFIG_LPAE
-	if (bank->start + size < bank->start) {
+#ifndef CONFIG_ARCH_PHYS_ADDR_T_64BIT
+	if (aligned_start > ULONG_MAX) {
+		printk(KERN_CRIT "Ignoring memory at 0x%08llx outside "
+		       "32-bit physical address space\n", (long long)start);
+		return -EINVAL;
+	}
+
+	if (aligned_start + size > ULONG_MAX) {
 		printk(KERN_CRIT "Truncating memory at 0x%08llx to fit in "
 			"32-bit physical address space\n", (long long)start);
 		/*
@@ -623,10 +621,25 @@ int __init arm_add_memory(phys_addr_t start, phys_addr_t size)
 		 * 32 bits, we use ULONG_MAX as the upper limit rather than 4GB.
 		 * This means we lose a page after masking.
 		 */
-		size = ULONG_MAX - bank->start;
+		size = ULONG_MAX - aligned_start;
 	}
 #endif
 
+	if (aligned_start < PHYS_OFFSET) {
+		if (aligned_start + size <= PHYS_OFFSET) {
+			pr_info("Ignoring memory below PHYS_OFFSET: 0x%08llx-0x%08llx\n",
+				aligned_start, aligned_start + size);
+			return -EINVAL;
+		}
+
+		pr_info("Ignoring memory below PHYS_OFFSET: 0x%08llx-0x%08llx\n",
+			aligned_start, (u64)PHYS_OFFSET);
+
+		size -= PHYS_OFFSET - aligned_start;
+		aligned_start = PHYS_OFFSET;
+	}
+
+	bank->start = aligned_start;
 	bank->size = size & ~(phys_addr_t)(PAGE_SIZE - 1);
 
 	/*
@@ -672,22 +685,7 @@ static int __init early_mem(char *p)
 }
 early_param("mem", early_mem);
 
-static void __init
-setup_ramdisk(int doload, int prompt, int image_start, unsigned int rd_sz)
-{
-#ifdef CONFIG_BLK_DEV_RAM
-	extern int rd_size, rd_image_start, rd_prompt, rd_doload;
-
-	rd_image_start = image_start;
-	rd_prompt = prompt;
-	rd_doload = doload;
-
-	if (rd_sz)
-		rd_size = rd_sz;
-#endif
-}
-
-static void __init request_standard_resources(struct machine_desc *mdesc)
+static void __init request_standard_resources(const struct machine_desc *mdesc)
 {
 	struct memblock_region *region;
 	struct resource *res;
@@ -732,35 +730,6 @@ static void __init request_standard_resources(struct machine_desc *mdesc)
 		request_resource(&ioport_resource, &lp2);
 }
 
-/*
- *  Tag parsing.
- *
- * This is the new way of passing data to the kernel at boot time.  Rather
- * than passing a fixed inflexible structure to the kernel, we pass a list
- * of variable-sized tags to the kernel.  The first tag must be a ATAG_CORE
- * tag for the list to be recognised (to distinguish the tagged list from
- * a param_struct).  The list is terminated with a zero-length tag (this tag
- * is not parsed in any way).
- */
-static int __init parse_tag_core(const struct tag *tag)
-{
-	if (tag->hdr.size > 2) {
-		if ((tag->u.core.flags & 1) == 0)
-			root_mountflags &= ~MS_RDONLY;
-		ROOT_DEV = old_decode_dev(tag->u.core.rootdev);
-	}
-	return 0;
-}
-
-__tagtable(ATAG_CORE, parse_tag_core);
-
-static int __init parse_tag_mem32(const struct tag *tag)
-{
-	return arm_add_memory(tag->u.mem.start, tag->u.mem.size);
-}
-
-__tagtable(ATAG_MEM, parse_tag_mem32);
-
 #if defined(CONFIG_VGA_CONSOLE) || defined(CONFIG_DUMMY_CONSOLE)
 struct screen_info screen_info = {
  .orig_video_lines	= 30,
@@ -770,116 +739,7 @@ struct screen_info screen_info = {
  .orig_video_isVGA	= 1,
  .orig_video_points	= 8
 };
-
-static int __init parse_tag_videotext(const struct tag *tag)
-{
-	screen_info.orig_x            = tag->u.videotext.x;
-	screen_info.orig_y            = tag->u.videotext.y;
-	screen_info.orig_video_page   = tag->u.videotext.video_page;
-	screen_info.orig_video_mode   = tag->u.videotext.video_mode;
-	screen_info.orig_video_cols   = tag->u.videotext.video_cols;
-	screen_info.orig_video_ega_bx = tag->u.videotext.video_ega_bx;
-	screen_info.orig_video_lines  = tag->u.videotext.video_lines;
-	screen_info.orig_video_isVGA  = tag->u.videotext.video_isvga;
-	screen_info.orig_video_points = tag->u.videotext.video_points;
-	return 0;
-}
-
-__tagtable(ATAG_VIDEOTEXT, parse_tag_videotext);
 #endif
-
-static int __init parse_tag_ramdisk(const struct tag *tag)
-{
-	setup_ramdisk((tag->u.ramdisk.flags & 1) == 0,
-		      (tag->u.ramdisk.flags & 2) == 0,
-		      tag->u.ramdisk.start, tag->u.ramdisk.size);
-	return 0;
-}
-
-__tagtable(ATAG_RAMDISK, parse_tag_ramdisk);
-
-static int __init parse_tag_serialnr(const struct tag *tag)
-{
-	system_serial_low = tag->u.serialnr.low;
-	system_serial_high = tag->u.serialnr.high;
-	return 0;
-}
-
-__tagtable(ATAG_SERIAL, parse_tag_serialnr);
-
-static int __init parse_tag_revision(const struct tag *tag)
-{
-	system_rev = tag->u.revision.rev;
-	return 0;
-}
-
-__tagtable(ATAG_REVISION, parse_tag_revision);
-
-static int __init parse_tag_cmdline(const struct tag *tag)
-{
-#if defined(CONFIG_CMDLINE_EXTEND)
-	strlcat(default_command_line, " ", COMMAND_LINE_SIZE);
-	strlcat(default_command_line, tag->u.cmdline.cmdline,
-		COMMAND_LINE_SIZE);
-#elif defined(CONFIG_CMDLINE_FORCE)
-	pr_warning("Ignoring tag cmdline (using the default kernel command line)\n");
-#else
-	strlcpy(default_command_line, tag->u.cmdline.cmdline,
-		COMMAND_LINE_SIZE);
-#endif
-	return 0;
-}
-
-__tagtable(ATAG_CMDLINE, parse_tag_cmdline);
-
-/*
- * Scan the tag table for this tag, and call its parse function.
- * The tag table is built by the linker from all the __tagtable
- * declarations.
- */
-static int __init parse_tag(const struct tag *tag)
-{
-	extern struct tagtable __tagtable_begin, __tagtable_end;
-	struct tagtable *t;
-
-	for (t = &__tagtable_begin; t < &__tagtable_end; t++)
-		if (tag->hdr.tag == t->tag) {
-			t->parse(tag);
-			break;
-		}
-
-	return t < &__tagtable_end;
-}
-
-/*
- * Parse all tags in the list, checking both the global and architecture
- * specific tag tables.
- */
-static void __init parse_tags(const struct tag *t)
-{
-	for (; t->hdr.size; t = tag_next(t))
-		if (!parse_tag(t))
-			printk(KERN_WARNING
-				"Ignoring unrecognised tag 0x%08x\n",
-				t->hdr.tag);
-}
-
-/*
- * This holds our defaults.
- */
-static struct init_tags {
-	struct tag_header hdr1;
-	struct tag_core   core;
-	struct tag_header hdr2;
-	struct tag_mem32  mem;
-	struct tag_header hdr3;
-} init_tags __initdata = {
-	{ tag_size(tag_core), ATAG_CORE },
-	{ 1, PAGE_SIZE, 0xff },
-	{ tag_size(tag_mem32), ATAG_MEM },
-	{ MEM_SIZE },
-	{ 0, ATAG_NONE }
-};
 
 static int __init customize_machine(void)
 {
@@ -939,78 +799,6 @@ static void __init reserve_crashkernel(void)
 static inline void reserve_crashkernel(void) {}
 #endif /* CONFIG_KEXEC */
 
-static void __init squash_mem_tags(struct tag *tag)
-{
-	for (; tag->hdr.size; tag = tag_next(tag))
-		if (tag->hdr.tag == ATAG_MEM)
-			tag->hdr.tag = ATAG_NONE;
-}
-
-static struct machine_desc * __init setup_machine_tags(unsigned int nr)
-{
-	struct tag *tags = (struct tag *)&init_tags;
-	struct machine_desc *mdesc = NULL, *p;
-	char *from = default_command_line;
-
-	init_tags.mem.start = PHYS_OFFSET;
-
-	/*
-	 * locate machine in the list of supported machines.
-	 */
-	for_each_machine_desc(p)
-		if (nr == p->nr) {
-			printk("Machine: %s\n", p->name);
-			mdesc = p;
-			break;
-		}
-
-	if (!mdesc) {
-		early_print("\nError: unrecognized/unsupported machine ID"
-			" (r1 = 0x%08x).\n\n", nr);
-		dump_machine_table(); /* does not return */
-	}
-
-	if (__atags_pointer)
-		tags = phys_to_virt(__atags_pointer);
-	else if (mdesc->atag_offset)
-		tags = (void *)(PAGE_OFFSET + mdesc->atag_offset);
-
-#if defined(CONFIG_DEPRECATED_PARAM_STRUCT)
-	/*
-	 * If we have the old style parameters, convert them to
-	 * a tag list.
-	 */
-	if (tags->hdr.tag != ATAG_CORE)
-		convert_to_tag_list(tags);
-#endif
-
-	if (tags->hdr.tag != ATAG_CORE) {
-#if defined(CONFIG_OF)
-		/*
-		 * If CONFIG_OF is set, then assume this is a reasonably
-		 * modern system that should pass boot parameters
-		 */
-		early_print("Warning: Neither atags nor dtb found\n");
-#endif
-		tags = (struct tag *)&init_tags;
-	}
-
-	if (mdesc->fixup)
-		mdesc->fixup(tags, &from, &meminfo);
-
-	if (tags->hdr.tag == ATAG_CORE) {
-		if (meminfo.nr_banks != 0)
-			squash_mem_tags(tags);
-		save_atags(tags);
-		parse_tags(tags);
-	}
-
-	/* parse_early_param needs a boot_command_line */
-	strlcpy(boot_command_line, from, COMMAND_LINE_SIZE);
-
-	return mdesc;
-}
-
 static int __init meminfo_cmp(const void *_a, const void *_b)
 {
 	const struct membank *a = _a, *b = _b;
@@ -1037,12 +825,12 @@ void __init hyp_mode_check(void)
 
 void __init setup_arch(char **cmdline_p)
 {
-	struct machine_desc *mdesc;
+	const struct machine_desc *mdesc;
 
 	setup_processor();
 	mdesc = setup_machine_fdt(__atags_pointer);
 	if (!mdesc)
-		mdesc = setup_machine_tags(machine_arch_type);
+		mdesc = setup_machine_tags(__atags_pointer, machine_arch_type);
 	machine_desc = mdesc;
 	machine_name = mdesc->name;
 

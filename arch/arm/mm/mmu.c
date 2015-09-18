@@ -103,6 +103,7 @@ static struct cachepolicy cache_policies[] __initdata = {
 	}
 };
 
+#ifdef CONFIG_CPU_CP15
 /*
  * These are useful for identifying cache coherency
  * problems by allowing the cache or the cache and
@@ -201,6 +202,22 @@ void adjust_cr(unsigned long mask, unsigned long set)
 }
 #endif
 
+#else /* ifdef CONFIG_CPU_CP15 */
+
+static int __init early_cachepolicy(char *p)
+{
+	pr_warning("cachepolicy kernel parameter not supported without cp15\n");
+}
+early_param("cachepolicy", early_cachepolicy);
+
+static int __init noalign_setup(char *__unused)
+{
+	pr_warning("noalign kernel parameter not supported without cp15\n");
+}
+__setup("noalign", noalign_setup);
+
+#endif /* ifdef CONFIG_CPU_CP15 / else */
+
 #define PROT_PTE_DEVICE		L_PTE_PRESENT|L_PTE_YOUNG|L_PTE_DIRTY|L_PTE_XN
 #define PROT_SECT_DEVICE	PMD_TYPE_SECT|PMD_SECT_AP_WRITE
 
@@ -264,6 +281,20 @@ static struct mem_type mem_types[] = {
 		.prot_sect = PMD_TYPE_SECT | PMD_SECT_AP_WRITE,
 		.domain    = DOMAIN_KERNEL,
 	},
+#ifdef CONFIG_ARM_LPAE
+	[MT_MEMORY_R] = {
+		.prot_sect = PMD_TYPE_SECT | PMD_SECT_AP2 | PMD_SECT_XN,
+		.domain    = DOMAIN_KERNEL,
+	},
+	[MT_MEMORY_RW] = {
+		.prot_sect = PMD_TYPE_SECT | PMD_SECT_XN,
+		.domain    = DOMAIN_KERNEL,
+	},
+	[MT_MEMORY_RX] = {
+		.prot_sect = PMD_TYPE_SECT | PMD_SECT_AP2,
+		.domain    = DOMAIN_KERNEL,
+	},
+#else
 	[MT_MEMORY_R] = {
 		.prot_sect = PMD_TYPE_SECT | PMD_SECT_XN,
 		.domain    = DOMAIN_KERNEL,
@@ -276,6 +307,7 @@ static struct mem_type mem_types[] = {
 		.prot_sect = PMD_TYPE_SECT,
 		.domain    = DOMAIN_KERNEL,
 	},
+#endif
 	[MT_ROM] = {
 		.prot_sect = PMD_TYPE_SECT,
 		.domain    = DOMAIN_KERNEL,
@@ -491,6 +523,16 @@ static void __init build_mem_type_table(void)
 	 */
 	cp = &cache_policies[cachepolicy];
 	vecs_pgprot = kern_pgprot = user_pgprot = cp->pte;
+
+	/*
+	 * We don't use domains on ARMv6 (since this causes problems with
+	 * v6/v7 kernels), so we must use a separate memory type for user
+	 * r/o, kernel r/w to map the vectors page.
+	 */
+#ifndef CONFIG_ARM_LPAE
+	if (cpu_arch == CPU_ARCH_ARMv6)
+		vecs_pgprot |= L_PTE_MT_VECTORS;
+#endif
 
 	/*
 	 * ARMv6 and above have extended page tables.
@@ -711,7 +753,8 @@ static void __init alloc_init_pmd(pud_t *pud, unsigned long addr,
 }
 
 static void __init alloc_init_pud(pgd_t *pgd, unsigned long addr,
-	unsigned long end, unsigned long phys, const struct mem_type *type)
+				  unsigned long end, phys_addr_t phys,
+				  const struct mem_type *type)
 {
 	pud_t *pud = pud_offset(pgd, addr);
 	unsigned long next;
@@ -1016,9 +1059,6 @@ void __init sanity_check_meminfo(void)
 		}
 	}
 #endif
-#ifdef CONFIG_DONT_MAP_HOLE_AFTER_MEMBANK0
-	find_memory_hole();
-#endif
 
 	for (i = 0, j = 0; i < meminfo.nr_banks; i++) {
 		struct membank *bank = &meminfo.bank[j];
@@ -1201,7 +1241,7 @@ void __init arm_mm_memblock_reserve(void)
  * called function.  This means you can't use any function or debugging
  * method which may touch any device, otherwise the kernel _will_ crash.
  */
-static void __init devicemaps_init(struct machine_desc *mdesc)
+static void __init devicemaps_init(const struct machine_desc *mdesc)
 {
 	struct map_desc map;
 	unsigned long addr;
@@ -1374,14 +1414,20 @@ void mem_text_address_writeable(unsigned long addr)
 	mem_unprotect.pmd_to_flush = mem_unprotect.pmd;
 	mem_unprotect.addr = addr & PAGE_MASK;
 
+#ifndef CONFIG_ARM_LPAE
 	if (addr & SECTION_SIZE)
-			mem_unprotect.pmd++;
+		mem_unprotect.pmd++;
+#endif
 
 	mem_unprotect.saved_pmd = *mem_unprotect.pmd;
 	if ((mem_unprotect.saved_pmd & PMD_TYPE_MASK) != PMD_TYPE_SECT)
 		return;
 
+#ifdef CONFIG_ARM_LPAE
+	*mem_unprotect.pmd &= ~PMD_SECT_AP2;
+#else
 	*mem_unprotect.pmd &= ~PMD_SECT_APX;
+#endif
 
 	flush_pmd_entry(mem_unprotect.pmd_to_flush);
 	flush_tlb_kernel_page(mem_unprotect.addr);
@@ -1576,6 +1622,8 @@ static void __init remap_pages(void)
 		bool fixup = false;
 		unsigned long saved_start = addr;
 
+		if (phys_start > arm_lowmem_limit)
+			break;
 		if (phys_end > arm_lowmem_limit)
 			end = (unsigned long)__va(arm_lowmem_limit);
 		if (phys_start >= phys_end)
@@ -1629,7 +1677,7 @@ static void __init remap_pages(void)
  * paging_init() sets up the page tables, initialises the zone memory
  * maps, and sets up the zero page, bad page and bad page tables.
  */
-void __init paging_init(struct machine_desc *mdesc)
+void __init paging_init(const struct machine_desc *mdesc)
 {
 	void *zero_page;
 
