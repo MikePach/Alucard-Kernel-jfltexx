@@ -1527,7 +1527,8 @@ static inline void set_window_start(struct rq *rq)
 	int cpu = cpu_of(rq);
 	struct rq *sync_rq = cpu_rq(sync_cpu);
 
-	if (rq->window_start || !sched_enable_hmp)
+	if (rq->window_start || !sched_enable_hmp ||
+	    !sched_clock_initialized() || !sched_clock_cpu(cpu))
 		return;
 
 	if (cpu == sync_cpu) {
@@ -2380,7 +2381,8 @@ static void sched_ttwu_pending(void)
 
 void scheduler_ipi(void)
 {
-	if (llist_empty(&this_rq()->wake_list) && !got_nohz_idle_kick())
+	if (llist_empty(&this_rq()->wake_list) && !got_nohz_idle_kick()
+	    && !tick_nohz_full_cpu(smp_processor_id()))
 		return;
 
 	/*
@@ -2397,6 +2399,7 @@ void scheduler_ipi(void)
 	 * somewhat pessimize the simple resched case.
 	 */
 	irq_enter();
+	tick_nohz_full_check();
 	sched_ttwu_pending();
 
 	/*
@@ -3123,6 +3126,8 @@ static void finish_task_switch(struct rq *rq, struct task_struct *prev)
 		kprobe_flush_task(prev);
 		put_task_struct(prev);
 	}
+
+	tick_nohz_task_switch(current);
 }
 
 #ifdef CONFIG_SMP
@@ -5407,8 +5412,13 @@ change:
 
 	if (running)
 		p->sched_class->set_curr_task(rq);
-	if (on_rq)
-		enqueue_task(rq, p, 0);
+	if (on_rq) {
+		/*
+		 * We enqueue to tail when the priority of a task is
+		 * increased (user space view).
+		 */
+		enqueue_task(rq, p, oldprio <= p->prio ? ENQUEUE_HEAD : 0);
+	}
 
 	check_class_changed(rq, p, prev_class, oldprio);
 	task_rq_unlock(rq, p, &flags);

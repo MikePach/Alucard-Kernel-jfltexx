@@ -110,7 +110,7 @@ static inline struct cpumask *tick_get_broadcast_mask(void)
 extern void tick_clock_notify(void);
 extern int tick_check_oneshot_change(int allow_nohz);
 extern struct tick_sched *tick_get_tick_sched(int cpu);
-extern void tick_check_idle(int cpu);
+extern void tick_check_idle(void);
 extern int tick_oneshot_mode_active(void);
 #  ifndef arch_needs_cpu
 #   define arch_needs_cpu(cpu) (0)
@@ -118,7 +118,7 @@ extern int tick_oneshot_mode_active(void);
 # else
 static inline void tick_clock_notify(void) { }
 static inline int tick_check_oneshot_change(int allow_nohz) { return 0; }
-static inline void tick_check_idle(int cpu) { }
+static inline void tick_check_idle(void) { }
 static inline int tick_oneshot_mode_active(void) { return 0; }
 static inline struct cpumask *tick_get_broadcast_oneshot_mask(void)
 {
@@ -131,7 +131,7 @@ static inline void tick_init(void) { }
 static inline void tick_cancel_sched_timer(int cpu) { }
 static inline void tick_clock_notify(void) { }
 static inline int tick_check_oneshot_change(int allow_nohz) { return 0; }
-static inline void tick_check_idle(int cpu) { }
+static inline void tick_check_idle(void) { }
 static inline int tick_oneshot_mode_active(void) { return 0; }
 #endif /* !CONFIG_GENERIC_CLOCKEVENTS */
 
@@ -190,12 +190,16 @@ static inline u64 get_cpu_iowait_time_us(int cpu, u64 *unused) { return -1; }
 
 #ifdef CONFIG_NO_HZ_FULL
 extern int tick_nohz_full_cpu(int cpu);
+extern void tick_nohz_full_check(void);
 extern void tick_nohz_full_kick(void);
 extern void tick_nohz_full_kick_all(void);
+extern void tick_nohz_task_switch(struct task_struct *tsk);
 #else
 static inline int tick_nohz_full_cpu(int cpu) { return 0; }
+static inline void tick_nohz_full_check(void) { }
 static inline void tick_nohz_full_kick(void) { }
 static inline void tick_nohz_full_kick_all(void) { }
+static inline void tick_nohz_task_switch(struct task_struct *tsk) { }
 #endif
 
 #endif

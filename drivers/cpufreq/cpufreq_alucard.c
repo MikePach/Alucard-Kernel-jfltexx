@@ -53,6 +53,7 @@
 /* Pump Inc/Dec for all cores */
 #define PUMP_INC_STEP_AT_MIN_FREQ	2
 #define PUMP_INC_STEP			2
+#define PUMP_DEC_STEP_AT_MIN_FREQ	2
 #define PUMP_DEC_STEP			1
 
 /* sample rate */
@@ -70,6 +71,7 @@ struct cpufreq_alucard_cpuinfo {
 	int pump_inc_step;
 	int pump_inc_step_at_min_freq;
 	int pump_dec_step;
+	int pump_dec_step_at_min_freq;
 	bool governor_enabled;
 	unsigned int up_rate;
 	unsigned int down_rate;
@@ -150,6 +152,10 @@ show_pcpu_param(pump_inc_step, 1);
 show_pcpu_param(pump_inc_step, 2);
 show_pcpu_param(pump_inc_step, 3);
 show_pcpu_param(pump_inc_step, 4);
+show_pcpu_param(pump_dec_step_at_min_freq, 1);
+show_pcpu_param(pump_dec_step_at_min_freq, 2);
+show_pcpu_param(pump_dec_step_at_min_freq, 3);
+show_pcpu_param(pump_dec_step_at_min_freq, 4);
 show_pcpu_param(pump_dec_step, 1);
 show_pcpu_param(pump_dec_step, 2);
 show_pcpu_param(pump_dec_step, 3);
@@ -212,6 +218,10 @@ store_pcpu_pump_param(pump_inc_step, 1);
 store_pcpu_pump_param(pump_inc_step, 2);
 store_pcpu_pump_param(pump_inc_step, 3);
 store_pcpu_pump_param(pump_inc_step, 4);
+store_pcpu_pump_param(pump_dec_step_at_min_freq, 1);
+store_pcpu_pump_param(pump_dec_step_at_min_freq, 2);
+store_pcpu_pump_param(pump_dec_step_at_min_freq, 3);
+store_pcpu_pump_param(pump_dec_step_at_min_freq, 4);
 store_pcpu_pump_param(pump_dec_step, 1);
 store_pcpu_pump_param(pump_dec_step, 2);
 store_pcpu_pump_param(pump_dec_step, 3);
@@ -225,6 +235,10 @@ define_one_global_rw(pump_inc_step_1);
 define_one_global_rw(pump_inc_step_2);
 define_one_global_rw(pump_inc_step_3);
 define_one_global_rw(pump_inc_step_4);
+define_one_global_rw(pump_dec_step_at_min_freq_1);
+define_one_global_rw(pump_dec_step_at_min_freq_2);
+define_one_global_rw(pump_dec_step_at_min_freq_3);
+define_one_global_rw(pump_dec_step_at_min_freq_4);
 define_one_global_rw(pump_dec_step_1);
 define_one_global_rw(pump_dec_step_2);
 define_one_global_rw(pump_dec_step_3);
@@ -422,6 +436,10 @@ static struct attribute *alucard_attributes[] = {
 	&pump_inc_step_2.attr,
 	&pump_inc_step_3.attr,
 	&pump_inc_step_4.attr,
+	&pump_dec_step_at_min_freq_1.attr,
+	&pump_dec_step_at_min_freq_2.attr,
+	&pump_dec_step_at_min_freq_3.attr,
+	&pump_dec_step_at_min_freq_4.attr,
 	&pump_dec_step_1.attr,
 	&pump_dec_step_2.attr,
 	&pump_dec_step_3.attr,
@@ -493,7 +511,7 @@ static void alucard_check_cpu(struct cpufreq_alucard_cpuinfo *this_alucard_cpuin
 	unsigned int j;
 
 	policy = this_alucard_cpuinfo->cur_policy;
-	if (!policy->cur)
+	if (!policy)
 		return;
 
 	/* Get min, current, max indexes from current cpu policy */
@@ -529,10 +547,12 @@ static void alucard_check_cpu(struct cpufreq_alucard_cpuinfo *this_alucard_cpuin
 	cpufreq_notify_utilization(policy, max_load);
 
 	/* CPUs Online Scale Frequency*/
-	if (policy->cur < freq_responsiveness) {
+	if (policy->cur < freq_responsiveness
+		 && policy->cur > 0) {
 		inc_cpu_load = alucard_tuners_ins.inc_cpu_load_at_min_freq;
 		dec_cpu_load = alucard_tuners_ins.dec_cpu_load_at_min_freq;
 		pump_inc_step = this_alucard_cpuinfo->pump_inc_step_at_min_freq;
+		pump_dec_step = this_alucard_cpuinfo->pump_dec_step_at_min_freq;
 	}
 	/* Check for frequency increase or for frequency decrease */
 	if (max_load >= inc_cpu_load && index < this_alucard_cpuinfo->max_index) {
@@ -582,9 +602,6 @@ static void do_alucard_timer(struct work_struct *work)
 		container_of(work, struct cpufreq_alucard_cpuinfo, work.work);
 	int delay;
 
-	if (unlikely(!cpu_online(this_alucard_cpuinfo->cpu) || !this_alucard_cpuinfo->cur_policy))
-		return;
-
 	mutex_lock(&this_alucard_cpuinfo->timer_mutex);
 
 	alucard_check_cpu(this_alucard_cpuinfo);
@@ -592,8 +609,7 @@ static void do_alucard_timer(struct work_struct *work)
 	delay = usecs_to_jiffies(alucard_tuners_ins.sampling_rate);
 
 	/* We want all CPUs to do sampling nearly on same jiffy */
-	if (num_online_cpus() > 1 
-		 && (jiffies % delay) < delay) {
+	if (num_online_cpus() > 1) {
 		delay -= jiffies % delay;
 	}
 
@@ -613,7 +629,7 @@ static int cpufreq_governor_alucard(struct cpufreq_policy *policy,
 
 	switch (event) {
 	case CPUFREQ_GOV_START:
-		if ((!cpu_online(cpu)) || (!policy->cur))
+		if (!policy)
 			return -EINVAL;
 
 		mutex_lock(&alucard_mutex);
@@ -657,8 +673,7 @@ static int cpufreq_governor_alucard(struct cpufreq_policy *policy,
 
 		delay = usecs_to_jiffies(alucard_tuners_ins.sampling_rate);
 		/* We want all CPUs to do sampling nearly on same jiffy */
-		if (num_online_cpus() > 1 
-			 && (jiffies % delay) < delay) {
+		if (num_online_cpus() > 1) {
 			delay -= jiffies % delay;
 		}
 
@@ -687,8 +702,8 @@ static int cpufreq_governor_alucard(struct cpufreq_policy *policy,
 
 		break;
 	case CPUFREQ_GOV_LIMITS:
-		if (!this_alucard_cpuinfo->cur_policy->cur
-			 || !policy->cur) {
+		if (!this_alucard_cpuinfo->cur_policy
+			 || !policy) {
 			pr_debug("Unable to limit cpu freq due to cur_policy == NULL\n");
 			return -EPERM;
 		}
@@ -725,6 +740,7 @@ static int __init cpufreq_gov_alucard_init(void)
 		this_alucard_cpuinfo->pump_inc_step_at_min_freq = PUMP_INC_STEP_AT_MIN_FREQ;
 		this_alucard_cpuinfo->pump_inc_step = PUMP_INC_STEP;
 		this_alucard_cpuinfo->pump_dec_step = PUMP_DEC_STEP;
+		this_alucard_cpuinfo->pump_dec_step_at_min_freq = PUMP_DEC_STEP_AT_MIN_FREQ;
 	}
 
 	alucard_wq = alloc_workqueue("alucard_wq", WQ_HIGHPRI, 0);

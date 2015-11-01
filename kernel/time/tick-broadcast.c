@@ -171,7 +171,10 @@ int tick_device_uses_broadcast(struct clock_event_device *dev, int cpu)
 		dev->event_handler = tick_handle_periodic;
 		tick_device_setup_broadcast_func(dev);
 		cpumask_set_cpu(cpu, tick_broadcast_mask);
-		tick_broadcast_start_periodic(bc);
+		if (tick_broadcast_device.mode == TICKDEV_MODE_PERIODIC)
+			tick_broadcast_start_periodic(bc);
+		else
+			tick_broadcast_setup_oneshot(bc);
 		ret = 1;
 	} else {
 		/*
@@ -548,10 +551,10 @@ int tick_resume_broadcast_oneshot(struct clock_event_device *bc)
  * Called from irq_enter() when idle was interrupted to reenable the
  * per cpu device.
  */
-void tick_check_oneshot_broadcast(int cpu)
+void tick_check_oneshot_broadcast_this_cpu(void)
 {
-	if (cpumask_test_cpu(cpu, tick_broadcast_oneshot_mask)) {
-		struct tick_device *td = &per_cpu(tick_cpu_device, cpu);
+	if (cpumask_test_cpu(smp_processor_id(), tick_broadcast_oneshot_mask)) {
+		struct tick_device *td = &__get_cpu_var(tick_cpu_device);
 
 		/*
 		 * We might be in the middle of switching over from
@@ -744,8 +747,6 @@ int tick_broadcast_oneshot_control(enum tick_broadcast_state state)
 	} else {
 		if (cpumask_test_and_clear_cpu(cpu, tick_broadcast_oneshot_mask)) {
 			clockevents_set_mode(dev, CLOCK_EVT_MODE_ONESHOT);
-			if (dev->next_event.tv64 == KTIME_MAX)
-				goto out;
 			/*
 			 * The cpu which was handling the broadcast
 			 * timer marked this cpu in the broadcast
@@ -759,6 +760,11 @@ int tick_broadcast_oneshot_control(enum tick_broadcast_state state)
 				       tick_broadcast_pending_mask))
 				goto out;
 
+			/*
+			 * Bail out if there is no next event.
+			 */
+			if (dev->next_event.tv64 == KTIME_MAX)
+				goto out;
 			/*
 			 * If the pending bit is not set, then we are
 			 * either the CPU handling the broadcast

@@ -23,10 +23,8 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 
-#ifdef CONFIG_POWERSUSPEND
-#include <linux/powersuspend.h>
-#else
-#include <linux/fb.h>
+#ifdef CONFIG_STATE_NOTIFIER
+#include <linux/state_notifier.h>
 #endif
 
 struct hotplug_cpuinfo {
@@ -46,10 +44,9 @@ struct hotplug_cpuinfo {
 
 static DEFINE_PER_CPU(struct hotplug_cpuinfo, od_hotplug_cpuinfo);
 
-#ifndef CONFIG_POWERSUSPEND
 static struct notifier_block notif;
-#endif
 static struct delayed_work alucard_hotplug_work;
+static struct workqueue_struct *alucard_hp_wq;
 
 static struct hotplug_tuners {
 	unsigned int hotplug_sampling_rate;
@@ -86,7 +83,7 @@ static void __ref hotplug_work_fn(struct work_struct *work)
 	unsigned int cpu = 0;
 	unsigned int rq_avg = 0;
 	bool rq_avg_calc = true;
-	int online_cpus;
+	int online_cpus, delay;
 	cpumask_var_t cpus;
 
 	if (hotplug_tuners_ins.suspended) {
@@ -227,17 +224,18 @@ static void __ref hotplug_work_fn(struct work_struct *work)
 		hotplug_tuners_ins.force_cpu_up = false;
 	}
 
-	mod_delayed_work_on(BOOT_CPU, system_wq,
+	delay = msecs_to_jiffies(hotplug_tuners_ins.hotplug_sampling_rate);
+	if (num_online_cpus() > 1) {
+		delay -= jiffies % delay;
+	}
+
+	queue_delayed_work_on(BOOT_CPU, alucard_hp_wq,
 				&alucard_hotplug_work,
-				msecs_to_jiffies(
-				hotplug_tuners_ins.hotplug_sampling_rate));
+				delay);
 }
 
-#ifdef CONFIG_POWERSUSPEND
-static void __alucard_hotplug_suspend(struct power_suspend *handler)
-#else
-static void __alucard_hotplug_suspend(void)
-#endif
+#ifdef CONFIG_STATE_NOTIFIER
+static void alucard_hotplug_suspend(void)
 {
 	if (hotplug_tuners_ins.hotplug_enable > 0
 				&& hotplug_tuners_ins.hotplug_suspend == 1 &&
@@ -246,11 +244,7 @@ static void __alucard_hotplug_suspend(void)
 	}
 }
 
-#ifdef CONFIG_POWERSUSPEND
-static void __ref __alucard_hotplug_resume(struct power_suspend *handler)
-#else
-static void __ref __alucard_hotplug_resume(void)
-#endif
+static void alucard_hotplug_resume(void)
 {
 	if (hotplug_tuners_ins.hotplug_enable > 0
 		&& hotplug_tuners_ins.suspended == true) {
@@ -261,38 +255,18 @@ static void __ref __alucard_hotplug_resume(void)
 	}
 }
 
-#ifdef CONFIG_POWERSUSPEND
-static struct power_suspend alucard_hotplug_power_suspend_driver = {
-	.suspend = __alucard_hotplug_suspend,
-	.resume = __alucard_hotplug_resume,
-};
-#else
-static int prev_fb = FB_BLANK_UNBLANK;
-
-static int fb_notifier_callback(struct notifier_block *self,
+static int state_notifier_callback(struct notifier_block *this,
 				unsigned long event, void *data)
 {
-	struct fb_event *evdata = data;
-	int *blank;
-
-	if (evdata && evdata->data && event == FB_EVENT_BLANK) {
-		blank = evdata->data;
-		switch (*blank) {
-			case FB_BLANK_UNBLANK:
-				if (prev_fb == FB_BLANK_POWERDOWN) {
-					/* display on */
-					__alucard_hotplug_resume();
-					prev_fb = FB_BLANK_UNBLANK;
-				}
-				break;
-			case FB_BLANK_POWERDOWN:
-				if (prev_fb == FB_BLANK_UNBLANK) {
-					/* display off */
-					__alucard_hotplug_suspend();
-					prev_fb = FB_BLANK_POWERDOWN;
-				}
-				break;
-		}
+	switch (event) {
+		case STATE_NOTIFIER_ACTIVE:
+			alucard_hotplug_resume();
+			break;
+		case STATE_NOTIFIER_SUSPEND:
+			alucard_hotplug_suspend();
+			break;
+		default:
+			break;
 	}
 
 	return NOTIFY_OK;
@@ -303,7 +277,7 @@ static int alucard_hotplug_callback(struct notifier_block *nb,
 			unsigned long action, void *data)
 {
 	unsigned int cpu = (unsigned long)data;
-	struct hotplug_cpuinfo *pcpu_info;
+	struct hotplug_cpuinfo *pcpu_info = NULL;
 
 	switch (action) {
 	case CPU_ONLINE:
@@ -311,11 +285,10 @@ static int alucard_hotplug_callback(struct notifier_block *nb,
 		pcpu_info->prev_cpu_idle = get_cpu_idle_time(cpu,
 				&pcpu_info->prev_cpu_wall,
 				0);
-		break;
-	case CPU_STARTING:
-		pcpu_info = &per_cpu(od_hotplug_cpuinfo, cpu);
 		pcpu_info->cur_up_rate = 1;
 		pcpu_info->cur_down_rate = 1;
+		break;
+	default:
 		break;
 	}
 
@@ -330,6 +303,7 @@ static struct notifier_block alucard_hotplug_nb =
 static void hotplug_start(void)
 {
 	unsigned int cpu;
+	int delay;
 
 	hotplug_tuners_ins.suspended = false;
 	hotplug_tuners_ins.force_cpu_up = false;
@@ -348,27 +322,27 @@ static void hotplug_start(void)
 	}
 	put_online_cpus();
 
-	INIT_DEFERRABLE_WORK(&alucard_hotplug_work, hotplug_work_fn);
-	mod_delayed_work_on(BOOT_CPU, system_wq,
-				&alucard_hotplug_work,
-				msecs_to_jiffies(
-				hotplug_tuners_ins.hotplug_sampling_rate));
+	delay = msecs_to_jiffies(hotplug_tuners_ins.hotplug_sampling_rate);
+	if (num_online_cpus() > 1) {
+		delay -= jiffies % delay;
+	}
 
-#ifdef CONFIG_POWERSUSPEND
-	register_power_suspend(&alucard_hotplug_power_suspend_driver);
-#else
-	notif.notifier_call = fb_notifier_callback;
-	if (fb_register_client(&notif))
-		pr_err("Failed to register FB notifier callback for Alucard Hotplug\n");
+	INIT_DEFERRABLE_WORK(&alucard_hotplug_work, hotplug_work_fn);
+	queue_delayed_work_on(BOOT_CPU, alucard_hp_wq,
+				&alucard_hotplug_work,
+				delay);
+
+#ifdef CONFIG_STATE_NOTIFIER
+	notif.notifier_call = state_notifier_callback;
+	if (state_register_client(&notif))
+		pr_err("Failed to register State notifier callback for Alucard Hotplug\n");
 #endif
 }
 
 static void hotplug_stop(void)
 {
-#ifdef CONFIG_POWERSUSPEND
-	unregister_power_suspend(&alucard_hotplug_power_suspend_driver);
-#else
-	fb_unregister_client(&notif);
+#ifdef CONFIG_STATE_NOTIFIER
+	state_unregister_client(&notif);
 	notif.notifier_call = NULL;
 #endif
 	cancel_delayed_work_sync(&alucard_hotplug_work);
@@ -745,6 +719,12 @@ static int __init alucard_hotplug_init(void)
 	if (ret) {
 		printk(KERN_ERR "failed at(%d)\n", __LINE__);
 		return ret;
+	}
+
+	alucard_hp_wq = alloc_workqueue("alu_hp_wq", WQ_HIGHPRI, 0);
+	if (!alucard_hp_wq) {
+		printk(KERN_ERR "Failed to create alu_hp_wq workqueue\n");
+		return -EFAULT;
 	}
 
 	/* INITIALIZE PCPU VARS */

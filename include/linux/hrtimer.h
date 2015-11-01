@@ -159,6 +159,7 @@ enum  hrtimer_base_type {
 	HRTIMER_BASE_MONOTONIC,
 	HRTIMER_BASE_REALTIME,
 	HRTIMER_BASE_BOOTTIME,
+	HRTIMER_BASE_TAI,
 	HRTIMER_MAX_CLOCK_BASES,
 };
 
@@ -170,6 +171,7 @@ enum  hrtimer_base_type {
  * @clock_was_set:	Indicates that clock was set from irq context.
  * @expires_next:	absolute time of the next event which was scheduled
  *			via clock_set_next_event()
+ * @in_hrtirq:		hrtimer_interrupt() is currently executing
  * @hres_active:	State of high resolution mode
  * @hang_detected:	The last hrtimer interrupt detected a hang
  * @nr_events:		Total number of hrtimer interrupt events
@@ -184,6 +186,7 @@ struct hrtimer_cpu_base {
 	unsigned int			clock_was_set;
 #ifdef CONFIG_HIGH_RES_TIMERS
 	ktime_t				expires_next;
+	int				in_hrtirq;
 	int				hres_active;
 	int				hang_detected;
 	unsigned long			nr_events;
@@ -329,7 +332,9 @@ extern ktime_t ktime_get(void);
 extern ktime_t ktime_get_real(void);
 extern ktime_t ktime_get_boottime(void);
 extern ktime_t ktime_get_monotonic_offset(void);
-extern ktime_t ktime_get_update_offsets(ktime_t *offs_real, ktime_t *offs_boot);
+extern ktime_t ktime_get_clocktai(void);
+extern ktime_t ktime_get_update_offsets(ktime_t *offs_real, ktime_t *offs_boot,
+					 ktime_t *offs_tai);
 
 DECLARE_PER_CPU(struct tick_device, tick_cpu_device);
 

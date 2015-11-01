@@ -42,20 +42,28 @@
 #include <linux/mutex.h>
 #include <linux/delay.h>
 #include <linux/swap.h>
-#include <linux/powersuspend.h>
 #include <linux/fs.h>
 #include <linux/cpuset.h>
+#include <linux/show_mem_notifier.h>
 #include <linux/vmpressure.h>
 
 #include <trace/events/memkill.h>
 #define CREATE_TRACE_POINTS
 #include <trace/events/almk.h>
 
+#ifdef CONFIG_STATE_NOTIFIER
+#include <linux/state_notifier.h>
+static struct notifier_block lmk_state_notif;
+#endif
+
 #ifdef CONFIG_HIGHMEM
 #define _ZONE ZONE_HIGHMEM
 #else
 #define _ZONE ZONE_NORMAL
 #endif
+
+#define CREATE_TRACE_POINTS
+#include "trace/lowmemorykiller.h"
 
 static uint32_t lowmem_debug_level = 1;
 static uint32_t lowmem_auto_oom = 1;
@@ -69,28 +77,28 @@ static short lowmem_adj[6] = {
 };
 static int lowmem_adj_size = 6;
 static int lowmem_minfree[6] = {
-	 3 *  512,	/* Foreground App: 	6 MB	*/
-	 2 * 1024,	/* Visible App: 	8 MB	*/
-	 4 * 1024,	/* Secondary Server: 	16 MB	*/
+	 4 * 1024,	/* Foreground App: 	16 MB	*/
+	 8 * 1024,	/* Visible App: 	32 MB	*/
+	16 * 1024,	/* Secondary Server: 	65 MB	*/
 	28 * 1024,	/* Hidden App: 		114 MB	*/
-	31 * 1024,	/* Content Provider: 	127 MB	*/
-	34 * 1024,	/* Empty App: 		139 MB	*/
+	45 * 1024,	/* Content Provider: 	184 MB	*/
+	50 * 1024,	/* Empty App: 		204 MB	*/
 };
 static int lowmem_minfree_screen_off[6] = {
-	3 * 512,	/* 6MB */
-	2 * 1024,	/* 8MB */
-	4 * 1024,	/* 16MB */
-	28 * 1024,	/* 114MB */
-	31 * 1024,	/* 127 MB */
-	34 * 1024,	/* 139 MB */
+	 4 * 1024,	/* 16 MB */
+	 8 * 1024,	/* 32 MB */
+	16 * 1024,	/* 65 MB */
+	28 * 1024,	/* 114 MB */
+	45 * 1024,	/* 184 MB */
+	50 * 1024,	/* 204 MB */
 };
 static int lowmem_minfree_screen_on[6] = {
-	3 * 512,	/* 6MB */
-	2 * 1024,	/* 8MB */
-	4 * 1024,	/* 16MB */
-	28 * 1024,	/* 114MB */
-	31 * 1024,	/* 127 MB */
-	34 * 1024,	/* 139 MB */
+	 4 * 1024,	/* 16 MB */
+	 8 * 1024,	/* 32 MB */
+	16 * 1024,	/* 65 MB */
+	28 * 1024,	/* 114 MB */
+	45 * 1024,	/* 184 MB */
+	50 * 1024,	/* 204 MB */
 };
 static int lowmem_minfree_size = 6;
 static int lmk_fast_run = 1;
@@ -106,6 +114,9 @@ static unsigned long lowmem_deathpending_timeout;
 static atomic_t shift_adj = ATOMIC_INIT(0);
 static short adj_max_shift = 353;
 
+static int vm_pressure_adaptive_start = 85;
+#define VM_PRESSURE_ADAPTIVE_STOP	95
+
 /* User knob to enable/disable adaptive lmk feature */
 static int enable_adaptive_lmk = 1;
 module_param_named(enable_adaptive_lmk, enable_adaptive_lmk, int,
@@ -118,7 +129,7 @@ module_param_named(enable_adaptive_lmk, enable_adaptive_lmk, int,
  * 90-94. Usually this is a pseudo minfree value, higher than the
  * highest configured value in minfree array.
  */
-static int vmpressure_file_min = 53059;
+static int vmpressure_file_min = 66560; /* (65 * 1024) * 4 = 266 MB */
 module_param_named(vmpressure_file_min, vmpressure_file_min, int,
 	S_IRUGO | S_IWUSR);
 
@@ -148,6 +159,8 @@ int adjust_minadj(short *min_score_adj)
 	return ret;
 }
 
+static unsigned long vm_pressure = 0;
+
 static int lmk_vmpressure_notifier(struct notifier_block *nb,
 			unsigned long action, void *data)
 {
@@ -158,7 +171,10 @@ static int lmk_vmpressure_notifier(struct notifier_block *nb,
 	if (!enable_adaptive_lmk)
 		return 0;
 
-	if (pressure >= 95) {
+	/* update vm_pressure state */
+	vm_pressure = pressure;
+
+	if (pressure >= VM_PRESSURE_ADAPTIVE_STOP) {
 		other_file = global_page_state(NR_FILE_PAGES) -
 			global_page_state(NR_SHMEM) -
 			total_swapcache_pages();
@@ -166,7 +182,7 @@ static int lmk_vmpressure_notifier(struct notifier_block *nb,
 
 		atomic_set(&shift_adj, 1);
 		trace_almk_vmpressure(pressure, other_free, other_file);
-	} else if (pressure >= 90) {
+	} else if (pressure >= vm_pressure_adaptive_start) {
 		if (lowmem_adj_size < array_size)
 			array_size = lowmem_adj_size;
 		if (lowmem_minfree_size < array_size)
@@ -216,8 +232,8 @@ static bool avoid_to_kill(uid_t uid)
 	 * uid == 1027 > nfc
 	 */
 	if (uid == 1001 || uid == 1002 || uid == 1010
-			|| uid == 1013 || uid == 1014
-			|| uid == 1021 || uid == 1027)
+			|| uid == 1014 || uid == 1021 ||
+			uid == 1027)
 		return 1;
 	return 0;
 }
@@ -301,7 +317,8 @@ void tune_lmk_zone_param(struct zonelist *zonelist, int classzone_idx,
 		za = &zall[node_idx][zone_idx];
 		za->free = zone_page_state(zone, NR_FREE_PAGES);
 		za->file = zone_page_state(zone, NR_FILE_PAGES)
-					- zone_page_state(zone, NR_SHMEM);
+					- zone_page_state(zone, NR_SHMEM)
+					- zone_page_state(zone, NR_SWAPCACHE);
 		if (zone_idx == ZONE_MOVABLE) {
 			if (!use_cma_pages && other_free) {
 				unsigned long free_cma = zone_page_state(zone,
@@ -453,13 +470,22 @@ static struct task_struct *pick_first_task(void);
 static struct task_struct *pick_last_task(void);
 #endif
 
-static int lowmem_shrink(struct shrinker *s, struct shrink_control *sc)
+static unsigned long lowmem_count(struct shrinker *s,
+				  struct shrink_control *sc)
+{
+	return global_page_state(NR_ACTIVE_ANON) +
+		global_page_state(NR_ACTIVE_FILE) +
+		global_page_state(NR_INACTIVE_ANON) +
+		global_page_state(NR_INACTIVE_FILE);
+}
+
+static unsigned long lowmem_scan(struct shrinker *s, struct shrink_control *sc)
 {
 	struct task_struct *tsk;
 	struct task_struct *selected = NULL;
 	const struct cred *pcred;
 	unsigned int uid = 0;
-	int rem = 0;
+	unsigned long rem = 0;
 	int tasksize;
 	int i;
 	int ret = 0;
@@ -482,10 +508,8 @@ static int lowmem_shrink(struct shrinker *s, struct shrink_control *sc)
 	}
 	rcu_read_unlock();
 
-	if (nr_to_scan > 0) {
-		if (mutex_lock_interruptible(&scan_mutex) < 0)
-			return 0;
-	}
+	if (mutex_lock_interruptible(&scan_mutex) < 0)
+		return 0;
 
 	other_free = global_page_state(NR_FREE_PAGES);
 
@@ -506,35 +530,29 @@ static int lowmem_shrink(struct shrinker *s, struct shrink_control *sc)
 		array_size = lowmem_minfree_size;
 	for (i = 0; i < array_size; i++) {
 		minfree = lowmem_minfree[i];
-		if (other_free < minfree && other_file < minfree) {
+		if (other_free + other_file < minfree) {
 			min_score_adj = lowmem_adj[i];
 			break;
 		}
 	}
-	if (nr_to_scan > 0) {
-		ret = adjust_minadj(&min_score_adj);
-		lowmem_print(3, "lowmem_shrink %lu, %x, ofree %d %d, ma %hd\n",
-				nr_to_scan, sc->gfp_mask, other_free,
-				other_file, min_score_adj);
-	}
+	ret = adjust_minadj(&min_score_adj);
 
-	rem = global_page_state(NR_ACTIVE_ANON) +
-		global_page_state(NR_ACTIVE_FILE) +
-		global_page_state(NR_INACTIVE_ANON) +
-		global_page_state(NR_INACTIVE_FILE);
-	if (nr_to_scan <= 0 || min_score_adj == OOM_SCORE_ADJ_MAX + 1) {
-		lowmem_print(5, "lowmem_shrink %lu, %x, return %d\n",
-			     nr_to_scan, sc->gfp_mask, rem);
+	lowmem_print(3, "lowmem_scan %lu, %x, ofree %d %d, ma %hd\n",
+			nr_to_scan, sc->gfp_mask, other_free,
+			other_file, min_score_adj);
 
-		if (nr_to_scan > 0)
-			mutex_unlock(&scan_mutex);
+	if (min_score_adj == OOM_SCORE_ADJ_MAX + 1) {
+		lowmem_print(5, "lowmem_scan %lu, %x, return 0\n",
+			     nr_to_scan, sc->gfp_mask);
 
-		if ((min_score_adj == OOM_SCORE_ADJ_MAX + 1) &&
-			(nr_to_scan > 0))
+		mutex_unlock(&scan_mutex);
+
+		if (min_score_adj == OOM_SCORE_ADJ_MAX + 1)
 			trace_almk_shrink(0, ret, other_free, other_file, 0);
 
-		return rem;
+		return 0;
 	}
+
 	selected_oom_score_adj = min_score_adj;
 
 	rcu_read_lock();
@@ -613,14 +631,14 @@ static int lowmem_shrink(struct shrinker *s, struct shrink_control *sc)
 		if (avoid_to_kill(uid) || protected_apps(p->comm)) {
 #else
 		if (avoid_to_kill(uid)) {
-			if (tasksize * (long)(PAGE_SIZE / 1024) >= 80000) {
+			if (tasksize * (long)(PAGE_SIZE / 1024) >= 50000) {
 				selected = p;
 				selected_tasksize = tasksize;
 				selected_oom_score_adj = oom_score_adj;
-				lowmem_print(2, "select '%s' (%d), adj %hd, size %ldkB, to kill\n",
+				lowmem_print(1, "selected protected application '%s' (%d), adj %hd, size %ldkB, to kill\n",
 					p->comm, p->pid, oom_score_adj, tasksize * (long)(PAGE_SIZE / 1024));
 			} else
-				lowmem_print(2, "selected skipped %s' (%d), adj %hd, size %ldkB, not kill\n",
+				lowmem_print(2, "selected protected application skipped %s' (%d), adj %hd, size %ldkB, not kill\n",
 					p->comm, p->pid, oom_score_adj, tasksize * (long)(PAGE_SIZE / 1024));
 		} else
 #endif
@@ -636,6 +654,10 @@ static int lowmem_shrink(struct shrinker *s, struct shrink_control *sc)
 		int i, j;
 		char zinfo[ZINFO_LENGTH];
 		char *p = zinfo;
+		long cache_size = other_file * (long)(PAGE_SIZE / 1024);
+		long cache_limit = minfree * (long)(PAGE_SIZE / 1024);
+		long free = other_free * (long)(PAGE_SIZE / 1024);
+		trace_lowmemory_kill(selected, cache_size, cache_limit, free);
 		lowmem_print(1, "Killing '%s' (%d), adj %hd,\n" \
 				"   to free %ldkB on behalf of '%s' (%d) because\n" \
 				"   cache %ldkB is below limit %ldkB for oom_score_adj %hd\n" \
@@ -652,10 +674,9 @@ static int lowmem_shrink(struct shrinker *s, struct shrink_control *sc)
 			     selected_oom_score_adj,
 			     selected_tasksize * (long)(PAGE_SIZE / 1024),
 			     current->comm, current->pid,
-			     other_file * (long)(PAGE_SIZE / 1024),
-			     minfree * (long)(PAGE_SIZE / 1024),
+			     cache_size, cache_limit,
 			     min_score_adj,
-			     other_free * (long)(PAGE_SIZE / 1024),
+			     free,
 			     global_page_state(NR_FREE_CMA_PAGES) *
 				(long)(PAGE_SIZE / 1024),
 			     totalreserve_pages * (long)(PAGE_SIZE / 1024),
@@ -672,10 +693,15 @@ static int lowmem_shrink(struct shrinker *s, struct shrink_control *sc)
 			     global_page_state(NR_SLAB_UNRECLAIMABLE) *
 				(long)(PAGE_SIZE / 1024),
 			     sc->gfp_mask);
+		if (vm_pressure >= vm_pressure_adaptive_start)
+			lowmem_print(1, "VM Pressure is %lu\n", vm_pressure);
+		else
+			lowmem_print(2, "VM Pressure is %lu\n", vm_pressure);
 
 		if (lowmem_debug_level >= 2 && selected_oom_score_adj == 0) {
 			show_mem(SHOW_MEM_FILTER_NODES);
 			dump_tasks(NULL, NULL);
+			show_mem_call_notifiers();
 		}
 
 		lowmem_deathpending_timeout = jiffies + HZ;
@@ -692,7 +718,7 @@ static int lowmem_shrink(struct shrinker *s, struct shrink_control *sc)
 				min_score_adj, sc->gfp_mask, zinfo);
 		set_tsk_thread_flag(selected, TIF_MEMDIE);
 		send_sig(SIGKILL, selected, 0);
-		rem -= selected_tasksize;
+		rem += selected_tasksize;
 		rcu_read_unlock();
 		/* give the system time to free up the memory */
 		msleep_interruptible(20);
@@ -703,40 +729,54 @@ static int lowmem_shrink(struct shrinker *s, struct shrink_control *sc)
 		rcu_read_unlock();
 	}
 
-	lowmem_print(4, "lowmem_shrink %lu, %x, return %d\n",
+	lowmem_print(4, "lowmem_scan %lu, %x, return %lu\n",
 		     nr_to_scan, sc->gfp_mask, rem);
 	mutex_unlock(&scan_mutex);
 	return rem;
 }
 
 static struct shrinker lowmem_shrinker = {
-	.shrink = lowmem_shrink,
+	.scan_objects = lowmem_scan,
+	.count_objects = lowmem_count,
 	.seeks = DEFAULT_SEEKS * 16
 };
 
-static void low_mem_power_suspend(struct power_suspend *handler)
+#ifdef CONFIG_STATE_NOTIFIER
+static void low_mem_power_suspend(void)
 {
-	if (lowmem_auto_oom) {
-		mutex_lock(&auto_oom_mutex);
-		memcpy(lowmem_minfree_screen_on, lowmem_minfree, sizeof(lowmem_minfree));
-		memcpy(lowmem_minfree, lowmem_minfree_screen_off, sizeof(lowmem_minfree_screen_off));
-		mutex_unlock(&auto_oom_mutex);
-	}
+	mutex_lock(&auto_oom_mutex);
+	memcpy(lowmem_minfree_screen_on, lowmem_minfree, sizeof(lowmem_minfree));
+	memcpy(lowmem_minfree, lowmem_minfree_screen_off, sizeof(lowmem_minfree_screen_off));
+	mutex_unlock(&auto_oom_mutex);
 }
 
-static void low_mem_late_resume(struct power_suspend *handler)
+static void low_mem_late_resume(void)
 {
-	if (lowmem_auto_oom) {
-		mutex_lock(&auto_oom_mutex);
-		memcpy(lowmem_minfree, lowmem_minfree_screen_on, sizeof(lowmem_minfree_screen_on));
-		mutex_unlock(&auto_oom_mutex);
-	}
+	mutex_lock(&auto_oom_mutex);
+	memcpy(lowmem_minfree, lowmem_minfree_screen_on, sizeof(lowmem_minfree_screen_on));
+	mutex_unlock(&auto_oom_mutex);
 }
 
-static struct power_suspend low_mem_suspend = {
-	.suspend = low_mem_power_suspend,
-	.resume = low_mem_late_resume,
-};
+static int state_notifier_callback(struct notifier_block *this,
+				unsigned long event, void *data)
+{
+	if (!lowmem_auto_oom)
+		return NOTIFY_OK;
+
+	switch (event) {
+		case STATE_NOTIFIER_ACTIVE:
+			low_mem_late_resume();
+			break;
+		case STATE_NOTIFIER_SUSPEND:
+			low_mem_power_suspend();
+			break;
+		default:
+			break;
+	}
+
+	return NOTIFY_OK;
+}
+#endif
 
 #ifdef CONFIG_ANDROID_BG_SCAN_MEM
 static int lmk_task_migration_notify(struct notifier_block *nb,
@@ -761,7 +801,13 @@ static int __init lowmem_init(void)
 {
 	register_shrinker(&lowmem_shrinker);
 	vmpressure_notifier_register(&lmk_vmpr_nb);
-	register_power_suspend(&low_mem_suspend);
+#ifdef CONFIG_STATE_NOTIFIER
+	lmk_state_notif.notifier_call = state_notifier_callback;
+	if (state_register_client(&lmk_state_notif))
+		pr_err("%s: Failed to register State notifier callback\n",
+			__func__);
+#endif
+
 #ifdef CONFIG_ANDROID_BG_SCAN_MEM
 	raw_notifier_chain_register(&bgtsk_migration_notifier_head,
 					&tsk_migration_nb);
@@ -772,6 +818,10 @@ static int __init lowmem_init(void)
 static void __exit lowmem_exit(void)
 {
 	unregister_shrinker(&lowmem_shrinker);
+#ifdef CONFIG_STATE_NOTIFIER
+	state_unregister_client(&lmk_state_notif);
+	lmk_state_notif.notifier_call = NULL;
+#endif
 #ifdef CONFIG_ANDROID_BG_SCAN_MEM
 	raw_notifier_chain_unregister(&bgtsk_migration_notifier_head,
 					&tsk_migration_nb);
@@ -963,11 +1013,13 @@ module_param_array_named(adj, lowmem_adj, short, &lowmem_adj_size,
 #endif
 module_param_array_named(minfree, lowmem_minfree, uint, &lowmem_minfree_size,
 			 S_IRUGO | S_IWUSR);
-module_param_array_named(minfree_screen_off, lowmem_minfree_screen_off, uint, &lowmem_minfree_size,
-			 S_IRUGO | S_IWUSR);
+module_param_array_named(minfree_screen_off, lowmem_minfree_screen_off, uint,
+			 &lowmem_minfree_size, S_IRUGO | S_IWUSR);
 module_param_named(debug_level, lowmem_debug_level, uint, S_IRUGO | S_IWUSR);
 module_param_named(auto_oom, lowmem_auto_oom, uint, S_IRUGO | S_IWUSR);
 module_param_named(lmk_fast_run, lmk_fast_run, int, S_IRUGO | S_IWUSR);
+module_param_named(vm_pressure_adaptive_start, vm_pressure_adaptive_start, int,
+		   S_IRUGO | S_IWUSR);
 
 module_init(lowmem_init);
 module_exit(lowmem_exit);

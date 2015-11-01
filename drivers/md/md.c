@@ -5123,6 +5123,8 @@ EXPORT_SYMBOL_GPL(md_stop_writes);
 void md_stop(struct mddev *mddev)
 {
 	mddev->ready = 0;
+	/* Ensure ->event_work is done */
+	flush_workqueue(md_misc_wq);
 	mddev->pers->stop(mddev);
 	if (mddev->pers->sync_request && mddev->to_remove == NULL)
 		mddev->to_remove = &md_redundancy_group;
@@ -5431,9 +5433,9 @@ static int get_bitmap_file(struct mddev * mddev, void __user * arg)
 	int err = -ENOMEM;
 
 	if (md_allow_write(mddev))
-		file = kmalloc(sizeof(*file), GFP_NOIO);
+		file = kzalloc(sizeof(*file), GFP_NOIO);
 	else
-		file = kmalloc(sizeof(*file), GFP_KERNEL);
+		file = kzalloc(sizeof(*file), GFP_KERNEL);
 
 	if (!file)
 		goto out;

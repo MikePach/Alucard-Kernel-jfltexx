@@ -897,7 +897,7 @@ static int attach_to_pi_owner(u32 uval, union futex_key *key,
 	if (!p)
 		return -ESRCH;
 
-	if (!p->mm) {
+	if (unlikely(p->flags & PF_KTHREAD)) {
 		put_task_struct(p);
 		return -EPERM;
 	}
@@ -2060,11 +2060,8 @@ static void futex_wait_queue_me(struct futex_hash_bucket *hb, struct futex_q *q,
 	queue_me(q, hb);
 
 	/* Arm the timer */
-	if (timeout) {
+	if (timeout)
 		hrtimer_start_expires(&timeout->timer, HRTIMER_MODE_ABS);
-		if (!hrtimer_active(&timeout->timer))
-			timeout->task = NULL;
-	}
 
 	/*
 	 * If we have been removed from the hash list, then another task
@@ -2255,7 +2252,7 @@ static long futex_wait_restart(struct restart_block *restart)
  * if there are waiters then it will block, it does PI, etc. (Due to
  * races the kernel might see a 0 value of the futex too.)
  */
-static int futex_lock_pi(u32 __user *uaddr, unsigned int flags, int detect,
+static int futex_lock_pi(u32 __user *uaddr, unsigned int flags,
 			 ktime_t *time, int trylock)
 {
 	struct hrtimer_sleeper timeout, *to = NULL;
@@ -2951,11 +2948,11 @@ long do_futex(u32 __user *uaddr, int op, u32 val, ktime_t *timeout,
 	case FUTEX_WAKE_OP:
 		return futex_wake_op(uaddr, flags, uaddr2, val, val2, val3);
 	case FUTEX_LOCK_PI:
-		return futex_lock_pi(uaddr, flags, val, timeout, 0);
+		return futex_lock_pi(uaddr, flags, timeout, 0);
 	case FUTEX_UNLOCK_PI:
 		return futex_unlock_pi(uaddr, flags);
 	case FUTEX_TRYLOCK_PI:
-		return futex_lock_pi(uaddr, flags, 0, timeout, 1);
+		return futex_lock_pi(uaddr, flags, NULL, 1);
 	case FUTEX_WAIT_REQUEUE_PI:
 		val3 = FUTEX_BITSET_MATCH_ANY;
 		return futex_wait_requeue_pi(uaddr, flags, val, timeout, val3,

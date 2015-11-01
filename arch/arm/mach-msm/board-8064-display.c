@@ -32,6 +32,11 @@
 #include <linux/powersuspend.h>
 #elif defined(CONFIG_LCD_NOTIFY)
 #include <linux/lcd_notify.h>
+#elif defined(CONFIG_STATE_NOTIFIER)
+#ifdef CONFIG_TOUCHSCREEN_SWEEP2WAKE
+bool scr_suspended;
+#endif
+#include <linux/state_notifier.h>
 #endif
 
 #ifdef CONFIG_FB_MSM_TRIPLE_BUFFER
@@ -278,9 +283,9 @@ static struct msm_bus_scale_pdata mdp_bus_scale_pdata = {
 static struct msm_panel_common_pdata mdp_pdata = {
 	.gpio = MDP_VSYNC_GPIO,
 	.mdp_max_clk = 266667000,
-	.mdp_max_bw = 4290000000u,
-	.mdp_bw_ab_factor = 230,
-	.mdp_bw_ib_factor = 250,
+	.mdp_max_bw = 2000000000,
+	.mdp_bw_ab_factor = 115,
+	.mdp_bw_ib_factor = 150,
 	.mdp_bus_scale_table = &mdp_bus_scale_pdata,
 	.mdp_rev = MDP_REV_44,
 #ifdef CONFIG_MSM_MULTIMEDIA_USE_ION
@@ -506,6 +511,12 @@ static int mipi_dsi_power(int enable)
 			set_power_suspend_state_panel_hook(
 				POWER_SUSPEND_INACTIVE);
 #endif
+#ifdef CONFIG_STATE_NOTIFIER
+#ifdef CONFIG_TOUCHSCREEN_SWEEP2WAKE
+		scr_suspended = false;
+#endif
+		state_resume();
+#endif
 	} else {
 
 #ifdef CONFIG_LCD_NOTIFY
@@ -530,6 +541,12 @@ static int mipi_dsi_power(int enable)
 		if (suspend_mode == POWER_SUSPEND_PANEL)
 			set_power_suspend_state_panel_hook(
 				POWER_SUSPEND_ACTIVE);
+#endif
+#ifdef CONFIG_STATE_NOTIFIER
+#ifdef CONFIG_TOUCHSCREEN_SWEEP2WAKE
+		scr_suspended = true;
+#endif
+		state_suspend();
 #endif
 	}
 

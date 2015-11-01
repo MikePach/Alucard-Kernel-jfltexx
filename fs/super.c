@@ -69,7 +69,7 @@ static int prune_super(struct shrinker *shrink, struct shrink_control *sc)
 		return -1;
 
 	if (!grab_super_passive(sb))
-		return !sc->nr_to_scan ? 0 : -1;
+		return -1;
 
 	if (sb->s_op && sb->s_op->nr_cached_objects)
 		fs_objects = sb->s_op->nr_cached_objects(sb);
@@ -84,13 +84,13 @@ static int prune_super(struct shrinker *shrink, struct shrink_control *sc)
 		int	inodes;
 
 		/* proportion the scan between the caches */
-		dentries = (sc->nr_to_scan * sb->s_nr_dentry_unused) /
-							total_objects;
-		inodes = (sc->nr_to_scan * sb->s_nr_inodes_unused) /
-							total_objects;
+		dentries = mult_frac(sc->nr_to_scan, sb->s_nr_dentry_unused,
+							total_objects);
+		inodes = mult_frac(sc->nr_to_scan, sb->s_nr_inodes_unused,
+							total_objects);
 		if (fs_objects)
-			fs_objects = (sc->nr_to_scan * fs_objects) /
-							total_objects;
+			fs_objects = mult_frac(sc->nr_to_scan, fs_objects,
+							total_objects);
 		/*
 		 * prune the dcache first as the icache is pinned by it, then
 		 * prune the icache, followed by the filesystem specific caches
@@ -106,7 +106,7 @@ static int prune_super(struct shrinker *shrink, struct shrink_control *sc)
 				sb->s_nr_inodes_unused + fs_objects;
 	}
 
-	total_objects = (total_objects / 100) * sysctl_vfs_cache_pressure;
+	total_objects = vfs_pressure_ratio(total_objects);
 	drop_super(sb);
 	return total_objects;
 }

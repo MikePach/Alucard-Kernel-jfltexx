@@ -73,7 +73,7 @@
 /* powerpc clocksource/clockevent code */
 
 #include <linux/clockchips.h>
-#include <linux/clocksource.h>
+#include <linux/timekeeper_internal.h>
 
 static cycle_t rtc_read(struct clocksource *);
 static struct clocksource clocksource_rtc = {
@@ -642,7 +642,7 @@ int update_persistent_clock(struct timespec now)
 	struct rtc_time tm;
 
 	if (!ppc_md.set_rtc_time)
-		return 0;
+		return -ENODEV;
 
 	to_tm(now.tv_sec + 1 + timezone_offset, &tm);
 	tm.tm_year -= 1900;
@@ -702,7 +702,7 @@ static cycle_t timebase_read(struct clocksource *cs)
 	return (cycle_t)get_tb();
 }
 
-void update_vsyscall(struct timespec *wall_time, struct timespec *wtm,
+void update_vsyscall_old(struct timespec *wall_time, struct timespec *wtm,
 			struct clocksource *clock, u32 mult)
 {
 	u64 new_tb_to_xs, new_stamp_xsec;
