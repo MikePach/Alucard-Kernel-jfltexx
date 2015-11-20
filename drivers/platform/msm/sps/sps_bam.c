@@ -143,6 +143,15 @@ polling:
 		SPS_DBG1("sps:bam=%pa;source=0x%x;mask=0x%x.\n",
 				BAM_ID(dev), source, mask);
 
+		if ((source == 0) && (dev->props.options & SPS_BAM_RES_CONFIRM)) {
+			SPS_DBG2(
+				"sps: BAM %pa has no source (source = 0x%x).\n",
+				BAM_ID(dev), source);
+
+			spin_unlock_irqrestore(&dev->isr_lock, flags);
+			return SPS_ERROR;
+		}
+
 		if ((source & (1UL << 31)) && (dev->props.callback)) {
 			SPS_DBG1("sps:bam=%pa;callback for case %d.\n",
 				BAM_ID(dev), cb_case);
@@ -231,7 +240,14 @@ static irqreturn_t bam_isr(int irq, void *ctxt)
 				SPS_DBG1(
 					"sps:bam_isr: handle IRQ for bam:%pa IRQ #:%d.\n",
 					BAM_ID(dev), irq);
-				sps_bam_check_irq(dev);
+				if (sps_bam_check_irq(dev)) {
+					SPS_DBG2(
+						"sps:bam_isr: callback bam:%pa IRQ #:%d to poll the pipes.\n",
+						BAM_ID(dev), irq);
+					dev->props.callback(
+						SPS_CALLBACK_BAM_RES_REL,
+						&ready);
+				}
 				dev->props.callback(SPS_CALLBACK_BAM_RES_REL,
 							&ready);
 			} else {
@@ -2244,4 +2260,20 @@ int sps_bam_pipe_get_unused_desc_num(struct sps_bam *dev, u32 pipe_index,
 		*desc_num = (peer_offset + fifo_size - sw_offset) / desc_size;
 
 	return 0;
+}
+
+/*
+ * Check if a pipe of a BAM has any pending descriptor
+ */
+bool sps_bam_pipe_pending_desc(struct sps_bam *dev, u32 pipe_index)
+{
+	u32 sw_offset, peer_offset;
+
+	sw_offset = bam_pipe_get_desc_read_offset(dev->base, pipe_index);
+	peer_offset = bam_pipe_get_desc_write_offset(dev->base, pipe_index);
+
+	if (sw_offset == peer_offset)
+		return false;
+	else
+		return true;
 }
