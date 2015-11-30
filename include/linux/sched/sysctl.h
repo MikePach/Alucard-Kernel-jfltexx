@@ -38,6 +38,11 @@ extern unsigned int sysctl_sched_child_runs_first;
 extern unsigned int sysctl_sched_wake_to_idle;
 extern unsigned int sysctl_sched_wakeup_load_threshold;
 extern unsigned int sysctl_sched_window_stats_policy;
+extern unsigned int sysctl_sched_account_wait_time;
+extern unsigned int sysctl_sched_ravg_hist_size;
+extern unsigned int sysctl_sched_freq_account_wait_time;
+extern unsigned int sysctl_sched_migration_fixup;
+extern unsigned int sysctl_sched_heavy_task_pct;
 
 #ifdef CONFIG_SCHED_DEBUG
 extern __read_mostly unsigned int sysctl_sched_yield_sleep_duration;
@@ -52,19 +57,18 @@ extern unsigned int sysctl_sched_init_task_load_pct;
 #endif
 
 #ifdef CONFIG_SCHED_FREQ_INPUT
-extern int sysctl_sched_freq_inc_notify_slack_pct;
-extern int sysctl_sched_freq_dec_notify_slack_pct;
+extern int sysctl_sched_freq_inc_notify;
+extern int sysctl_sched_freq_dec_notify;
 #endif
 
 #ifdef CONFIG_SCHED_HMP
 extern unsigned int sysctl_sched_spill_nr_run;
-extern unsigned int sysctl_sched_mostly_idle_nr_run;
 extern unsigned int sysctl_sched_spill_load_pct;
-extern unsigned int sysctl_sched_mostly_idle_load_pct;
 extern unsigned int sysctl_sched_small_task_pct;
 extern unsigned int sysctl_sched_upmigrate_pct;
 extern unsigned int sysctl_sched_downmigrate_pct;
 extern int sysctl_sched_upmigrate_min_nice;
+extern unsigned int sysctl_sched_prefer_idle;
 extern unsigned int sysctl_sched_powerband_limit_pct;
 extern unsigned int sysctl_sched_boost;
 
@@ -102,6 +106,9 @@ extern int sched_hmp_proc_update_handler(struct ctl_table *table,
 
 extern int sched_boost_handler(struct ctl_table *table, int write,
 		void __user *buffer, size_t *lenp, loff_t *ppos);
+
+extern int sched_window_update_handler(struct ctl_table *table,
+		 int write, void __user *buffer, size_t *lenp, loff_t *ppos);
 
 #ifdef CONFIG_SCHED_DEBUG
 static inline unsigned int get_sysctl_timer_migration(void)

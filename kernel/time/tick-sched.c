@@ -45,6 +45,38 @@ DEFINE_PER_CPU(struct tick_sched, tick_cpu_sched);
  */
 static ktime_t last_jiffies_update;
 
+/*
+ * Conversion from ktime to sched_clock is error prone. Use this
+ * as a safetly margin when calculating the sched_clock value at
+ * a particular jiffy as last_jiffies_update uses ktime.
+ */
+#define SCHED_CLOCK_MARGIN 100000
+
+static u64 ns_since_jiffy(void)
+{
+	ktime_t delta;
+
+	delta = ktime_sub(ktime_get(), last_jiffies_update);
+
+	return ktime_to_ns(delta);
+}
+
+u64 jiffy_to_sched_clock(u64 *now, u64 *jiffy_sched_clock)
+{
+	u64 cur_jiffies;
+	unsigned long seq;
+
+	do {
+		seq = read_seqbegin(&jiffies_lock);
+		*now = sched_clock();
+		*jiffy_sched_clock = *now -
+			(ns_since_jiffy() + SCHED_CLOCK_MARGIN);
+		cur_jiffies = get_jiffies_64();
+	} while (read_seqretry(&jiffies_lock, seq));
+
+	return cur_jiffies;
+}
+
 struct tick_sched *tick_get_tick_sched(int cpu)
 {
 	return &per_cpu(tick_cpu_sched, cpu);
@@ -571,6 +603,13 @@ static ktime_t tick_nohz_stop_sched_tick(struct tick_sched *ts,
 		} else if (!ts->do_timer_last) {
 			time_delta = KTIME_MAX;
 		}
+
+#ifdef CONFIG_NO_HZ_FULL
+		if (!ts->inidle) {
+			time_delta = min(time_delta,
+					 scheduler_tick_max_deferment());
+		}
+#endif
 
 		/*
 		 * calculate the expiry time for the next timer wheel

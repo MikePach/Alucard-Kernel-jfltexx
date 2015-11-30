@@ -299,7 +299,9 @@ static void print_cpu(struct seq_file *m, int cpu)
 #ifdef CONFIG_SMP
 	P(cpu_power);
 #endif
-#if defined(CONFIG_SCHED_HMP) || defined(CONFIG_SCHED_FREQ_INPUT)
+#ifdef CONFIG_SCHED_HMP
+	P(mostly_idle_load);
+	P(mostly_idle_nr_run);
 	P(load_scale_factor);
 	P(capacity);
 	P(max_possible_capacity);
@@ -393,7 +395,6 @@ static int sched_debug_show(struct seq_file *m, void *v)
 	P(sysctl_sched_child_runs_first);
 	P(sysctl_sched_features);
 #ifdef CONFIG_SCHED_HMP
-	P(sched_mostly_idle_load);
 	P(sched_small_task);
 	P(sched_upmigrate);
 	P(sched_downmigrate);
@@ -506,7 +507,7 @@ void proc_sched_show_task(struct task_struct *p, struct seq_file *m)
 
 #if defined(CONFIG_SMP) && defined(CONFIG_FAIR_GROUP_SCHED)
 	__P(load_avg);
-#if defined(CONFIG_SCHED_FREQ_INPUT) || defined(CONFIG_SCHED_HMP)
+#ifdef CONFIG_SCHED_HMP
 	P(ravg.demand);
 	P(se.avg.runnable_avg_sum_scaled);
 #endif
