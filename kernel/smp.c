@@ -53,10 +53,13 @@ hotplug_cfd(struct notifier_block *nfb, unsigned long action, void *hcpu)
 				cpu_to_node(cpu)))
 			return notifier_from_errno(-ENOMEM);
 		if (!zalloc_cpumask_var_node(&cfd->cpumask_ipi, GFP_KERNEL,
-				cpu_to_node(cpu)))
+				cpu_to_node(cpu))) {
+			free_cpumask_var(cfd->cpumask);
 			return notifier_from_errno(-ENOMEM);
+		}
 		cfd->csd = alloc_percpu(struct call_single_data);
 		if (!cfd->csd) {
+			free_cpumask_var(cfd->cpumask_ipi);
 			free_cpumask_var(cfd->cpumask);
 			return notifier_from_errno(-ENOMEM);
 		}
@@ -721,7 +724,7 @@ void on_each_cpu_cond(bool (*cond_func)(int cpu, void *info),
 			if (cond_func(cpu, info)) {
 				ret = smp_call_function_single(cpu, func,
 								info, wait);
-				WARN_ON_ONCE(!ret);
+				WARN_ON_ONCE(ret);
 			}
 		preempt_enable();
 	}
