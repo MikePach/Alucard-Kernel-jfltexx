@@ -455,16 +455,16 @@ static asmlinkage void __exception_irq_entry gic_handle_irq(struct pt_regs *regs
 
 		if (likely(irqnr > 15 && irqnr < 1021)) {
 			irqnr = irq_find_mapping(gic->domain, irqnr);
-			handle_IRQ(irqnr, regs);
 			uncached_logk(LOGK_IRQ, (void *)(uintptr_t)irqnr);
+			handle_IRQ(irqnr, regs);
 			continue;
 		}
 		if (irqnr < 16) {
 			writel_relaxed_no_log(irqstat, cpu_base + GIC_CPU_EOI);
+			uncached_logk(LOGK_IRQ, (void *)(uintptr_t)irqnr);
 #ifdef CONFIG_SMP
 			handle_IPI(irqnr, regs);
 #endif
-			uncached_logk(LOGK_IRQ, (void *)(uintptr_t)irqnr);
 			continue;
 		}
 		break;
@@ -778,11 +778,6 @@ static void gic_cpu_restore(unsigned int gic_nr)
 	if (!dist_base || !cpu_base)
 		return;
 
-	ptr = __this_cpu_ptr(gic_data[gic_nr].saved_ppi_enable);
-	for (i = 0; i < DIV_ROUND_UP(32, 32); i++)
-		writel_relaxed_no_log(ptr[i], dist_base +
-			GIC_DIST_ENABLE_SET + i * 4);
-
 	ptr = __this_cpu_ptr(gic_data[gic_nr].saved_ppi_conf);
 	for (i = 0; i < DIV_ROUND_UP(32, 16); i++)
 		writel_relaxed_no_log(ptr[i], dist_base +
@@ -791,6 +786,11 @@ static void gic_cpu_restore(unsigned int gic_nr)
 	for (i = 0; i < DIV_ROUND_UP(32, 4); i++)
 		writel_relaxed_no_log(gic_data[gic_nr].saved_dist_pri[i],
 			dist_base + GIC_DIST_PRI + i * 4);
+
+	ptr = __this_cpu_ptr(gic_data[gic_nr].saved_ppi_enable);
+	for (i = 0; i < DIV_ROUND_UP(32, 32); i++)
+		writel_relaxed_no_log(ptr[i], dist_base +
+			GIC_DIST_ENABLE_SET + i * 4);
 
 	writel_relaxed_no_log(0xf0, cpu_base + GIC_CPU_PRIMASK);
 	writel_relaxed_no_log(saved_cpu_ctrl, cpu_base + GIC_CPU_CTRL);
@@ -883,9 +883,9 @@ void gic_raise_softirq(const struct cpumask *mask, unsigned int irq)
 		sgir |= (1 << 15);
 	/*
 	 * Ensure that stores to Normal memory are visible to the
-	 * other CPUs before issuing the IPI.
+	 * other CPUs before they observe us issuing the IPI.
 	 */
-	dsb();
+	dmb(ishst);
 
 	/* this always happens on GIC0 */
 	writel_relaxed_no_log(sgir,

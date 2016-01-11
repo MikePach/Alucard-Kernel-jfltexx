@@ -147,7 +147,6 @@ print_task(struct seq_file *m, struct rq *rq, struct task_struct *p)
 static void print_rq(struct seq_file *m, struct rq *rq, int rq_cpu)
 {
 	struct task_struct *g, *p;
-	unsigned long flags;
 
 	SEQ_printf(m,
 	"\nrunnable tasks:\n"
@@ -156,16 +155,14 @@ static void print_rq(struct seq_file *m, struct rq *rq, int rq_cpu)
 	"------------------------------------------------------"
 	"----------------------------------------------------\n");
 
-	read_lock_irqsave(&tasklist_lock, flags);
-
-	do_each_thread(g, p) {
+	rcu_read_lock();
+	for_each_process_thread(g, p) {
 		if (!p->on_rq || task_cpu(p) != rq_cpu)
 			continue;
 
 		print_task(m, rq, p);
-	} while_each_thread(g, p);
-
-	read_unlock_irqrestore(&tasklist_lock, flags);
+	}
+	rcu_read_unlock();
 }
 
 void print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq)
@@ -231,6 +228,16 @@ void print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq)
 			cfs_rq->throttled);
 	SEQ_printf(m, "  .%-30s: %d\n", "throttle_count",
 			cfs_rq->throttle_count);
+	SEQ_printf(m, "  .%-30s: %d\n", "runtime_enabled",
+			cfs_rq->runtime_enabled);
+#ifdef CONFIG_SCHED_HMP
+	SEQ_printf(m, "  .%-30s: %d\n", "nr_big_tasks",
+			cfs_rq->hmp_stats.nr_big_tasks);
+	SEQ_printf(m, "  .%-30s: %d\n", "nr_small_tasks",
+			cfs_rq->hmp_stats.nr_small_tasks);
+	SEQ_printf(m, "  .%-30s: %llu\n", "cumulative_runnable_avg",
+			cfs_rq->hmp_stats.cumulative_runnable_avg);
+#endif
 #endif
 
 	print_cfs_group_stats(m, cpu, cfs_rq->tg);
@@ -302,16 +309,18 @@ static void print_cpu(struct seq_file *m, int cpu)
 #ifdef CONFIG_SCHED_HMP
 	P(mostly_idle_load);
 	P(mostly_idle_nr_run);
-	P(load_scale_factor);
-	P(capacity);
-	P(max_possible_capacity);
-	P(efficiency);
-	P(cur_freq);
-	P(max_freq);
+	P(cluster->load_scale_factor);
+	P(cluster->capacity);
+	P(cluster->max_possible_capacity);
+	P(cluster->efficiency);
+	P(cluster->cur_freq);
+	P(cluster->max_freq);
 #endif
 #ifdef CONFIG_SCHED_HMP
-	P(nr_big_tasks);
-	P(nr_small_tasks);
+	P(hmp_stats.nr_big_tasks);
+	P(hmp_stats.nr_small_tasks);
+	SEQ_printf(m, "  .%-30s: %llu\n", "hmp_stats.cumulative_runnable_avg",
+			rq->hmp_stats.cumulative_runnable_avg);
 #endif
 #undef P
 #undef PN
@@ -339,9 +348,7 @@ static void print_cpu(struct seq_file *m, int cpu)
 	print_cfs_stats(m, cpu);
 	print_rt_stats(m, cpu);
 
-	rcu_read_lock();
 	print_rq(m, rq, cpu);
-	rcu_read_unlock();
 	spin_unlock_irqrestore(&sched_debug_lock, flags);
 }
 
